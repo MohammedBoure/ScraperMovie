@@ -976,101 +976,455 @@ INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ArabCity Scraper</title>
+  <title>ArabCity Cinema</title>
+  <script src="https://unpkg.com/lucide@latest"></script>
   <style>
-    :root { color-scheme: light; --ink:#17202a; --muted:#667085; --line:#d8dee8; --panel:#ffffff; --brand:#0d9488; --bg:#f4f7fb; --bad:#b42318; }
+    :root {
+      color-scheme: dark;
+      --bg:#070912;
+      --bg-soft:#101321;
+      --panel:rgba(18,21,36,.72);
+      --panel-solid:#121524;
+      --line:rgba(255,255,255,.09);
+      --line-strong:rgba(255,255,255,.16);
+      --ink:#f8fafc;
+      --muted:#a6adbb;
+      --faint:#6f7788;
+      --brand:#7c3aed;
+      --brand-2:#16b8a6;
+      --gold:#f6b23c;
+      --bad:#fb7185;
+      --glow:rgba(124,58,237,.34);
+      --accent:linear-gradient(135deg,#4f46e5 0%,#16b8a6 100%);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: Tahoma, Arial, sans-serif; background: var(--bg); color: var(--ink); }
-    header { padding: 22px clamp(14px, 4vw, 42px); background: #111827; color: white; }
-    h1 { margin: 0 0 6px; font-size: clamp(24px, 4vw, 38px); letter-spacing: 0; }
-    header p { margin: 0; color: #cbd5e1; }
-    main { max-width: 1180px; margin: 0 auto; padding: 20px clamp(12px, 3vw, 28px) 34px; }
-    form { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(120px, .7fr) minmax(160px, 1fr) auto; gap: 10px; align-items: end; }
-    label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
-    select, input, button { min-height: 42px; border: 1px solid var(--line); border-radius: 6px; padding: 0 12px; font: inherit; background: white; color: var(--ink); }
-    button { border-color: var(--brand); background: var(--brand); color: white; cursor: pointer; font-weight: 700; }
-    .toggle { display: flex; align-items: center; gap: 8px; color: var(--ink); min-height: 42px; }
-    .toggle input { min-height: auto; }
-    .status { margin: 16px 0; color: var(--muted); min-height: 24px; }
-    .status.error { color: var(--bad); }
-    table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-    th, td { padding: 12px; border-bottom: 1px solid var(--line); text-align: right; vertical-align: top; }
-    th { background: #eef4f8; font-size: 13px; color: #344054; }
-    tr:last-child td { border-bottom: 0; }
-    a { color: #0f766e; text-decoration: none; }
-    .poster { width: 58px; height: 82px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); background: #e5e7eb; display: block; }
-    .poster-missing { width: 58px; height: 82px; border-radius: 6px; border: 1px solid var(--line); background: linear-gradient(135deg, #e5e7eb, #f8fafc); display: grid; place-items: center; color: #64748b; font-size: 11px; }
-    .pill { display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 3px 9px; background: #e6f6f4; color: #0f766e; font-size: 12px; }
-    .raw { color: var(--muted); font-size: 12px; margin-top: 4px; }
-    .actions { display: grid; gap: 8px; min-width: 150px; }
-    .episodes-button { min-height: 34px; padding: 0 10px; border-radius: 6px; font-size: 13px; }
-    .episode-list { display: grid; gap: 6px; }
-    .episode-link { display: block; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; font-size: 13px; }
-    .inline-error { color: var(--bad); font-size: 12px; }
-    .player-panel { display: none; position: sticky; bottom: 0; z-index: 10; margin-top: 18px; border: 1px solid var(--line); border-radius: 8px 8px 0 0; background: #0f172a; box-shadow: 0 -16px 36px rgba(15, 23, 42, .22); overflow: hidden; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Tahoma, Arial, sans-serif;
+      background:
+        radial-gradient(circle at 78% 8%, rgba(79,70,229,.26), transparent 32%),
+        radial-gradient(circle at 14% 18%, rgba(22,184,166,.16), transparent 28%),
+        linear-gradient(180deg,#070912 0%,#0b0d17 46%,#080a12 100%);
+      color: var(--ink);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 52px 52px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.75), transparent 80%);
+    }
+    a { color: inherit; text-decoration: none; }
+    button, input, select { font: inherit; }
+    svg { width: 18px; height: 18px; flex: 0 0 auto; }
+    .navbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      min-height: 76px;
+      padding: 0 clamp(14px,4vw,54px);
+      background: rgba(7,9,18,.78);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(18px);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--accent);
+      box-shadow: 0 12px 30px var(--glow);
+    }
+    .brand-mark svg { width: 21px; height: 21px; }
+    .nav-pills {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: .92rem;
+    }
+    .nav-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.035);
+    }
+    main { width: min(1280px,100%); margin: 0 auto; padding: 26px clamp(12px,3vw,34px) 42px; }
+    .hero {
+      position: relative;
+      min-height: 330px;
+      display: grid;
+      align-items: end;
+      overflow: hidden;
+      border-bottom: 1px solid var(--line);
+      padding: 46px 0 34px;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: 12px 0 auto;
+      height: 280px;
+      border-radius: 8px;
+      background:
+        linear-gradient(to top, rgba(7,9,18,.98), rgba(7,9,18,.52), rgba(7,9,18,.18)),
+        url("https://h.top4top.io/p_3660ot8jj1.png") center/cover;
+      opacity: .46;
+      filter: saturate(1.08);
+      z-index: -1;
+    }
+    .hero-content { width: min(900px,100%); }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: rgba(22,184,166,.13);
+      border: 1px solid rgba(22,184,166,.24);
+      color: #85f4e8;
+      font-size: .86rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(32px,5vw,58px); line-height: 1.1; letter-spacing: 0; }
+    .hero p { margin: 14px 0 0; max-width: 720px; color: var(--muted); font-size: 1rem; line-height: 1.8; }
+    .control-panel {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.8fr) minmax(112px,.7fr) minmax(190px,1fr) minmax(180px,.9fr) auto;
+      gap: 12px;
+      align-items: end;
+      margin-top: 26px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(13,16,29,.78);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 20px 46px rgba(0,0,0,.26);
+    }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
+    select, input {
+      min-height: 44px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: rgba(255,255,255,.055);
+      color: var(--ink);
+    }
+    select:focus, input:focus { border-color: rgba(22,184,166,.72); box-shadow: 0 0 0 3px rgba(22,184,166,.12); }
+    select option { background: #121524; color: var(--ink); }
+    .toggle {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.035);
+      color: var(--ink);
+    }
+    .toggle input { width: 18px; min-height: auto; accent-color: var(--brand-2); }
+    .primary-button, .episodes-button, .watch-now, .player-controls a, .player-controls button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      border: 0;
+      border-radius: 8px;
+      padding: 0 14px;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+      font-weight: 800;
+      box-shadow: 0 12px 28px rgba(79,70,229,.22);
+      transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease, background .22s ease;
+    }
+    .primary-button:hover, .episodes-button:hover, .watch-now:hover { transform: translateY(-2px); box-shadow: 0 16px 32px rgba(22,184,166,.22); }
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin: 28px 0 18px;
+    }
+    .section-title {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.35rem;
+      font-weight: 800;
+    }
+    .section-title::before {
+      content: "";
+      width: 5px;
+      height: 24px;
+      border-radius: 99px;
+      background: var(--accent);
+      box-shadow: 0 0 18px var(--glow);
+    }
+    .status {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.035);
+      color: var(--muted);
+      font-size: .9rem;
+      text-align: left;
+    }
+    .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
+    .media-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+      gap: 18px;
+      align-items: start;
+    }
+    .media-card {
+      position: relative;
+      overflow: hidden;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(20,23,39,.62);
+      box-shadow: 0 18px 38px rgba(0,0,0,.24);
+      transition: transform .24s ease, border-color .24s ease, box-shadow .24s ease;
+    }
+    .media-card:hover { transform: translateY(-6px); border-color: var(--line-strong); box-shadow: 0 24px 54px rgba(0,0,0,.34); }
+    .poster-wrap { position: relative; aspect-ratio: 2 / 3; background: #151827; overflow: hidden; }
+    .poster { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .32s ease; }
+    .media-card:hover .poster { transform: scale(1.05); }
+    .poster-missing {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(79,70,229,.18), rgba(22,184,166,.13));
+      color: var(--faint);
+      font-weight: 800;
+    }
+    .poster-shade { position: absolute; inset: auto 0 0; height: 44%; background: linear-gradient(to top, rgba(7,9,18,.94), transparent); pointer-events: none; }
+    .card-badge, .type-badge {
+      position: absolute;
+      top: 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 26px;
+      padding: 0 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(7,9,18,.68);
+      color: var(--gold);
+      font-size: .76rem;
+      font-weight: 800;
+      backdrop-filter: blur(10px);
+    }
+    .card-badge { right: 10px; }
+    .type-badge { left: 10px; color: white; background: rgba(79,70,229,.72); }
+    .card-info { padding: 13px; display: grid; gap: 9px; }
+    .card-title {
+      margin: 0;
+      min-height: 46px;
+      color: var(--ink);
+      font-size: .98rem;
+      line-height: 1.45;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+    .raw { color: var(--muted); font-size: .78rem; line-height: 1.55; min-height: 18px; overflow-wrap: anywhere; }
+    .card-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--faint);
+      font-size: .78rem;
+    }
+    .pill { display: inline-flex; align-items: center; gap: 5px; color: #a7f3d0; font-weight: 800; }
+    .actions { display: grid; gap: 8px; margin-top: 2px; }
+    .secondary-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .episodes-button {
+      width: 100%;
+      min-height: 38px;
+      background: rgba(255,255,255,.065);
+      border: 1px solid var(--line);
+      box-shadow: none;
+    }
+    .open-source {
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: rgba(255,255,255,.04);
+    }
+    .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; padding-top: 2px; }
+    .episode-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 36px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.045);
+      color: var(--ink);
+      font-size: .82rem;
+      font-weight: 700;
+    }
+    .episode-link:hover { border-color: rgba(22,184,166,.42); color: #99f6e4; }
+    .inline-error { color: #fecdd3; font-size: .82rem; line-height: 1.6; }
+    .empty-state {
+      grid-column: 1 / -1;
+      min-height: 210px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border: 1px dashed var(--line-strong);
+      border-radius: 8px;
+      color: var(--muted);
+      background: rgba(255,255,255,.025);
+      padding: 24px;
+    }
+    .player-panel {
+      display: none;
+      position: sticky;
+      bottom: 0;
+      z-index: 18;
+      margin-top: 24px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px 8px 0 0;
+      background: rgba(3,5,12,.94);
+      box-shadow: 0 -22px 58px rgba(0,0,0,.42);
+      overflow: hidden;
+      backdrop-filter: blur(18px);
+    }
     .player-panel.active { display: block; }
-    .player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; color: white; }
-    .player-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+    .player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; color: white; border-bottom: 1px solid var(--line); }
+    .player-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
     .player-controls { display: flex; gap: 8px; flex: 0 0 auto; }
-    .player-controls a, .player-controls button { min-height: 34px; border-radius: 6px; border: 1px solid #334155; padding: 0 10px; background: #1f2937; color: white; font: inherit; }
-    .player-frame { display: block; width: 100%; height: min(68vh, 720px); border: 0; background: #020617; }
-    .player-video { display: block; width: 100%; max-height: min(68vh, 720px); background: #020617; }
+    .player-controls a, .player-controls button { min-height: 36px; background: rgba(255,255,255,.075); border: 1px solid var(--line); box-shadow: none; }
+    .player-controls a:hover, .player-controls button:hover { background: var(--accent); }
+    .player-frame { display: block; width: 100%; height: min(68vh, 720px); border: 0; background: #000; }
+    .player-video { display: block; width: 100%; max-height: min(68vh, 720px); background: #000; }
     .player-frame[hidden], .player-video[hidden] { display: none; }
-    @media (max-width: 760px) {
-      form { grid-template-columns: 1fr; }
-      th:nth-child(5), td:nth-child(5) { display: none; }
-      table { font-size: 14px; }
+    footer { margin-top: 44px; padding: 24px 0 0; border-top: 1px solid var(--line); color: var(--faint); text-align: center; font-size: .86rem; }
+    @media (max-width: 960px) {
+      .nav-pills { display: none; }
+      .control-panel { grid-template-columns: 1fr 1fr; }
+      .control-panel .primary-button { grid-column: 1 / -1; }
+    }
+    @media (max-width: 620px) {
+      .navbar { min-height: 66px; }
+      .brand { font-size: 1.08rem; }
+      .brand-mark { width: 34px; height: 34px; }
+      main { padding-inline: 12px; }
+      .hero { min-height: auto; padding-top: 28px; }
+      .hero::after { height: 260px; }
+      .control-panel { grid-template-columns: 1fr; }
+      .status-row { align-items: stretch; flex-direction: column; }
+      .status { justify-content: center; text-align: center; }
+      .media-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+      .card-info { padding: 10px; }
+      .card-title { font-size: .88rem; min-height: 42px; }
+      .secondary-actions { grid-template-columns: 1fr; }
       .player-frame { height: 62vh; }
     }
   </style>
 </head>
 <body>
-  <header>
-    <h1>ArabCity Scraper</h1>
-    <p>استخراج أسماء الأفلام والمسلسلات وعدد الحلقات المتاح من صفحات الكتالوج.</p>
+  <svg style="width:0;height:0;position:absolute;" aria-hidden="true" focusable="false">
+    <linearGradient id="brand-gradient-id" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"></stop>
+      <stop offset="100%" stop-color="#16b8a6"></stop>
+    </linearGradient>
+  </svg>
+  <header class="navbar">
+    <a class="brand" href="/">
+      <span class="brand-mark"><i data-lucide="clapperboard"></i></span>
+      <span>ArabCity Cinema</span>
+    </a>
+    <nav class="nav-pills" aria-label="أقسام الواجهة">
+      <span class="nav-pill"><i data-lucide="film"></i> أفلام</span>
+      <span class="nav-pill"><i data-lucide="tv"></i> مسلسلات</span>
+      <span class="nav-pill"><i data-lucide="play-circle"></i> مشاهدة</span>
+    </nav>
   </header>
   <main>
-    <form id="scrapeForm">
-      <label>الكتالوج
-        <select id="catalog"></select>
-      </label>
-      <label>عدد الصفحات
-        <input id="pages" type="number" min="1" max="25" value="1">
-      </label>
-      <label>بحث داخل النتائج
-        <input id="search" type="search" placeholder="اختياري">
-      </label>
-      <label class="toggle">
-        <input id="details" type="checkbox" checked>
-        حساب الحلقات من التفاصيل
-      </label>
-      <button type="submit">بدء الاستخراج</button>
-    </form>
-    <div id="status" class="status">جاهز.</div>
-    <table>
-      <thead>
-        <tr>
-          <th>الصورة</th>
-          <th>الاسم</th>
-          <th>النوع</th>
-          <th>الحلقات</th>
-          <th>المصدر</th>
-          <th>الرابط</th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-    </table>
+    <section class="hero">
+      <div class="hero-content">
+        <div class="eyebrow"><i data-lucide="sparkles"></i> تجربة مستوحاة من Showtime4U</div>
+        <h1>استكشف الكتالوج وشاهد الحلقات داخل مشغل أنيق.</h1>
+        <p>واجهة داكنة وسريعة لكتالوجات ArabCity، مع بطاقات بوسترات وروابط حلقات ومشغل مدمج يحاول استخدام روابط المشاهدة المباشرة أولا.</p>
+        <form id="scrapeForm" class="control-panel">
+          <label>الكتالوج
+            <select id="catalog"></select>
+          </label>
+          <label>عدد الصفحات
+            <input id="pages" type="number" min="1" max="25" value="1">
+          </label>
+          <label>بحث داخل النتائج
+            <input id="search" type="search" placeholder="اختياري">
+          </label>
+          <label class="toggle">
+            <input id="details" type="checkbox" checked>
+            حساب الحلقات
+          </label>
+          <button class="primary-button" type="submit"><i data-lucide="search"></i><span>بدء الاستخراج</span></button>
+        </form>
+      </div>
+    </section>
+    <section class="results-section">
+      <div class="status-row">
+        <h2 class="section-title">النتائج</h2>
+        <div id="status" class="status">جاهز.</div>
+      </div>
+      <div id="rows" class="media-grid"></div>
+    </section>
     <section id="playerPanel" class="player-panel" aria-live="polite">
       <div class="player-bar">
         <div id="playerTitle" class="player-title">المشغل</div>
         <div class="player-controls">
-          <a id="playerExternal" href="#" target="_blank" rel="noreferrer">فتح خارجي</a>
-          <button id="playerClose" type="button">إغلاق</button>
+          <a id="playerExternal" href="#" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>فتح خارجي</span></a>
+          <button id="playerClose" type="button"><i data-lucide="x"></i><span>إغلاق</span></button>
         </div>
       </div>
       <iframe id="episodePlayer" class="player-frame" title="مشغل الحلقة" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer"></iframe>
       <video id="episodeVideo" class="player-video" controls playsinline hidden></video>
     </section>
+    <footer>ArabCity Cinema - واجهة مشاهدة محلية مستوحاة من الواجهات السينمائية الحديثة.</footer>
   </main>
   <script>
     const catalog = document.querySelector("#catalog");
@@ -1082,6 +1436,10 @@ INDEX_HTML = """<!doctype html>
     const playerTitle = document.querySelector("#playerTitle");
     const playerExternal = document.querySelector("#playerExternal");
     const playerClose = document.querySelector("#playerClose");
+
+    function refreshIcons() {
+      if (window.lucide) window.lucide.createIcons();
+    }
 
     function setStatus(text, isError = false) {
       statusBox.textContent = text;
@@ -1097,32 +1455,56 @@ INDEX_HTML = """<!doctype html>
         option.textContent = `${item.name} (${item.id})`;
         catalog.appendChild(option);
       }
+      refreshIcons();
     }
 
     function renderItems(items) {
       rows.innerHTML = "";
-      for (const item of items) {
-        const tr = document.createElement("tr");
-        const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : "";
-        tr.innerHTML = `
-          <td>${posterMarkup(item)}</td>
-          <td>${escapeHtml(item.name)}${raw}</td>
-          <td><span class="pill">${item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط"}</span></td>
-          <td>${item.kind === "series" ? (item.episode_count || "غير معروف") : "-"}</td>
-          <td>${escapeHtml(item.source)}</td>
-          <td>${actionsMarkup(item)}</td>
-        `;
-        rows.appendChild(tr);
+      if (!items.length) {
+        rows.innerHTML = `<div class="empty-state"><div><i data-lucide="search-x"></i><h3>لا توجد نتائج</h3><p>جرّب كتالوجا آخر أو غيّر عبارة البحث.</p></div></div>`;
+        refreshIcons();
+        return;
       }
+      for (const item of items) {
+        const card = document.createElement("article");
+        card.className = "media-card";
+        const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : `<div class="raw">&nbsp;</div>`;
+        const kindLabel = item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط";
+        const episodes = item.kind === "series" ? (item.episode_count || "غير معروف") : "-";
+        card.innerHTML = `
+          <div class="poster-wrap">
+            ${posterMarkup(item)}
+            <div class="poster-shade"></div>
+            <span class="card-badge"><i data-lucide="star"></i>${escapeHtml(item.source)}</span>
+            <span class="type-badge">${kindLabel}</span>
+          </div>
+          <div class="card-info">
+            <h3 class="card-title">${escapeHtml(item.name)}</h3>
+            ${raw}
+            <div class="card-meta">
+              <span class="pill"><i data-lucide="layers"></i>${kindLabel}</span>
+              <span>${item.kind === "series" ? `${episodes} حلقة` : "فيلم"}</span>
+            </div>
+            ${actionsMarkup(item)}
+          </div>
+        `;
+        rows.appendChild(card);
+      }
+      refreshIcons();
     }
 
     function actionsMarkup(item) {
-      const openLink = `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">فتح</a>`;
-      if (item.kind !== "series") return `<div class="actions">${openLink}</div>`;
+      const title = escapeHtml(item.name);
+      const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>مشاهدة</span></a>`;
+      const openLink = `<a class="open-source" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" title="فتح المصدر"><i data-lucide="external-link"></i></a>`;
+      if (item.kind !== "series") return `<div class="actions">${watchLink}<div class="secondary-actions">${openLink}</div></div>`;
       return `
         <div class="actions">
-          ${openLink}
-          <button class="episodes-button" type="button" data-url="${escapeHtml(item.url)}">الحلقات</button>
+          ${watchLink}
+          <div class="secondary-actions">
+            <button class="episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات</span></button>
+            ${openLink}
+          </div>
           <div class="episode-list"></div>
         </div>
       `;
@@ -1191,24 +1573,25 @@ INDEX_HTML = """<!doctype html>
     rows.addEventListener("click", async (event) => {
       const button = event.target.closest(".episodes-button");
       if (!button) return;
-      const list = button.nextElementSibling;
+      const list = button.parentElement.nextElementSibling;
       if (button.dataset.loaded === "1") {
         list.hidden = !list.hidden;
         return;
       }
       button.disabled = true;
-      button.textContent = "...";
+      button.innerHTML = `<i data-lucide="loader"></i><span>...</span>`;
+      refreshIcons();
       list.innerHTML = "";
       try {
         const response = await fetch(`/api/episodes?url=${encodeURIComponent(button.dataset.url)}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
         if (!data.episodes.length) {
-          list.innerHTML = `<a class="episode-link episode-play" href="${escapeHtml(button.dataset.url)}" data-title="صفحة العمل">مشاهدة هنا</a>`;
+          list.innerHTML = `<a class="episode-link episode-play" href="${escapeHtml(button.dataset.url)}" data-title="صفحة العمل"><span>مشاهدة هنا</span><i data-lucide="play"></i></a>`;
         } else {
           list.innerHTML = data.episodes.map(episode => {
             const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}">${escapeHtml(label)}</a>`;
+            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><i data-lucide="play"></i></a>`;
           }).join("");
         }
         button.dataset.loaded = "1";
@@ -1216,7 +1599,8 @@ INDEX_HTML = """<!doctype html>
         list.innerHTML = `<span class="inline-error">${escapeHtml(error.message)}</span>`;
       } finally {
         button.disabled = false;
-        button.textContent = "الحلقات";
+        button.innerHTML = `<i data-lucide="list-video"></i><span>الحلقات</span>`;
+        refreshIcons();
       }
     });
 
@@ -1241,6 +1625,7 @@ INDEX_HTML = """<!doctype html>
     });
 
     loadCatalogs().catch(error => setStatus(error.message, true));
+    refreshIcons();
   </script>
 </body>
 </html>

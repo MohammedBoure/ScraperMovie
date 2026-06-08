@@ -364,9 +364,18 @@ class ArabCityScraperTests(unittest.TestCase):
     def test_index_progressively_renders_results_in_memory(self):
         self.assertIn("const RESULTS_PAGE_SIZE = 40", INDEX_HTML)
         self.assertIn("let extractedItems = []", INDEX_HTML)
-        self.assertIn("extractedItems.slice(0, visibleItemCount)", INDEX_HTML)
+        self.assertIn("filteredItems.slice(0, visibleItemCount)", INDEX_HTML)
         self.assertIn('id="loadMore"', INDEX_HTML)
         self.assertIn("عرض المزيد", INDEX_HTML)
+
+    def test_index_filters_current_results_with_tabs(self):
+        self.assertIn('id="resultTabs"', INDEX_HTML)
+        self.assertIn('data-tab="all"', INDEX_HTML)
+        self.assertIn('data-tab="movies"', INDEX_HTML)
+        self.assertIn('data-tab="series"', INDEX_HTML)
+        self.assertIn('data-tab="ready"', INDEX_HTML)
+        self.assertIn("itemMatchesResultTab", INDEX_HTML)
+        self.assertIn("applyResultTab(button.dataset.tab", INDEX_HTML)
 
     def test_index_blocks_unverified_episode_watch_buttons(self):
         self.assertIn("isDirectVideoUrl", INDEX_HTML)

@@ -1832,6 +1832,29 @@ INDEX_HTML = """<!doctype html>
       text-align: left;
     }
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
+    .result-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: -6px 0 16px;
+    }
+    .result-tab {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.04);
+      color: var(--muted);
+      font-weight: 900;
+      cursor: pointer;
+      transition: background .2s ease, border-color .2s ease, color .2s ease, transform .2s ease;
+    }
+    .result-tab:hover { transform: translateY(-1px); border-color: var(--line-strong); color: var(--ink); }
+    .result-tab.is-active { color: #99f6e4; border-color: rgba(22,184,166,.44); background: rgba(22,184,166,.11); }
+    .result-tab small { color: var(--faint); font-size: .75rem; font-weight: 900; }
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(5, minmax(0,1fr));
@@ -2138,6 +2161,12 @@ INDEX_HTML = """<!doctype html>
         <h2 class="section-title">النتائج</h2>
         <div id="status" class="status">جاهز.</div>
       </div>
+      <div id="resultTabs" class="result-tabs" aria-label="تصفية النتائج">
+        <button class="result-tab is-active" type="button" data-tab="all">الكل</button>
+        <button class="result-tab" type="button" data-tab="movies">أفلام</button>
+        <button class="result-tab" type="button" data-tab="series">مسلسلات</button>
+        <button class="result-tab" type="button" data-tab="ready">جاهز للتشغيل</button>
+      </div>
       <div id="statsGrid" class="stats-grid" aria-live="polite"></div>
       <div class="watch-layout">
         <div class="results-column">
@@ -2169,6 +2198,7 @@ INDEX_HTML = """<!doctype html>
     const catalog = document.querySelector("#catalog");
     const rows = document.querySelector("#rows");
     const loadMoreButton = document.querySelector("#loadMore");
+    const resultTabs = document.querySelector("#resultTabs");
     const statsGrid = document.querySelector("#statsGrid");
     const statusBox = document.querySelector("#status");
     const playerPanel = document.querySelector("#playerPanel");
@@ -2182,7 +2212,9 @@ INDEX_HTML = """<!doctype html>
     let searchTimer = null;
     let renderBatch = 0;
     let extractedItems = [];
+    let filteredItems = [];
     let visibleItemCount = 0;
+    let activeResultTab = "all";
     let currentPlayerContext = {};
     const RESULTS_PAGE_SIZE = 40;
     const HLS_NETWORK_RETRY_LIMIT = 3;
@@ -2214,6 +2246,7 @@ INDEX_HTML = """<!doctype html>
     function renderLoadingCards(count = 12) {
       renderStats();
       extractedItems = [];
+      filteredItems = [];
       visibleItemCount = 0;
       loadMoreButton.hidden = true;
       rows.innerHTML = Array.from({ length: count }, () => `
@@ -2290,12 +2323,50 @@ INDEX_HTML = """<!doctype html>
 
     function renderItems(items) {
       extractedItems = Array.isArray(items) ? items : [];
-      visibleItemCount = Math.min(RESULTS_PAGE_SIZE, extractedItems.length);
+      applyResultTab(activeResultTab, { resetVisible: true });
+    }
+
+    function itemPlayerStatus(item) {
+      const cached = playerCheckCache.get(playerCheckKey(item));
+      if (cached && cached.status) return cached.status;
+      return playerStatusFromItem(item);
+    }
+
+    function itemMatchesResultTab(item, tab = activeResultTab) {
+      if (tab === "movies") return item.kind === "movie";
+      if (tab === "series") return item.kind === "series";
+      if (tab === "ready") return item.playable || itemPlayerStatus(item) === "direct";
+      return true;
+    }
+
+    function applyResultTab(tab = "all", { resetVisible = true } = {}) {
+      activeResultTab = tab;
+      filteredItems = extractedItems.filter(item => itemMatchesResultTab(item, activeResultTab));
+      if (resetVisible) {
+        visibleItemCount = Math.min(RESULTS_PAGE_SIZE, filteredItems.length);
+      } else {
+        visibleItemCount = Math.min(Math.max(visibleItemCount, Math.min(RESULTS_PAGE_SIZE, filteredItems.length)), filteredItems.length);
+      }
+      updateResultTabs();
       renderVisibleItems();
     }
 
+    function tabCount(tab) {
+      return extractedItems.filter(item => itemMatchesResultTab(item, tab)).length;
+    }
+
+    function updateResultTabs() {
+      for (const button of resultTabs.querySelectorAll(".result-tab")) {
+        const tab = button.dataset.tab || "all";
+        button.classList.toggle("is-active", tab === activeResultTab);
+        const label = button.dataset.label || button.textContent.trim().replace(/\\s+\\d+$/, "");
+        button.dataset.label = label;
+        button.innerHTML = `${escapeHtml(label)} <small>${tabCount(tab)}</small>`;
+      }
+    }
+
     function updateLoadMoreButton() {
-      const remaining = Math.max(0, extractedItems.length - visibleItemCount);
+      const remaining = Math.max(0, filteredItems.length - visibleItemCount);
       loadMoreButton.hidden = remaining <= 0;
       if (remaining > 0) {
         const nextCount = Math.min(RESULTS_PAGE_SIZE, remaining);
@@ -2307,13 +2378,14 @@ INDEX_HTML = """<!doctype html>
       renderBatch += 1;
       const batch = renderBatch;
       rows.innerHTML = "";
-      if (!extractedItems.length) {
-        rows.innerHTML = `<div class="empty-state"><div><i data-lucide="search-x"></i><h3>لا توجد نتائج</h3><p>جرّب كتالوجا آخر أو غيّر عبارة البحث.</p></div></div>`;
+      if (!filteredItems.length) {
+        const message = extractedItems.length ? "لا توجد نتائج في هذا التبويب." : "جرّب كتالوجا آخر أو غيّر عبارة البحث.";
+        rows.innerHTML = `<div class="empty-state"><div><i data-lucide="search-x"></i><h3>لا توجد نتائج</h3><p>${message}</p></div></div>`;
         loadMoreButton.hidden = true;
         refreshIcons();
         return;
       }
-      const visibleItems = extractedItems.slice(0, visibleItemCount);
+      const visibleItems = filteredItems.slice(0, visibleItemCount);
       for (const item of visibleItems) {
         const card = document.createElement("article");
         card.className = "media-card";
@@ -2421,6 +2493,7 @@ INDEX_HTML = """<!doctype html>
       const status = data.status || "uncertain";
       chip.className = `direct-chip is-${status}`;
       chip.innerHTML = `<i data-lucide="${playerStatusIcon(status)}"></i><span>${playerStatusLabel(status)}</span>`;
+      updateResultTabs();
       refreshIcons();
     }
 
@@ -2767,8 +2840,13 @@ INDEX_HTML = """<!doctype html>
       searchTimer = setTimeout(() => loadItems(), 420);
     });
     loadMoreButton.addEventListener("click", () => {
-      visibleItemCount = Math.min(extractedItems.length, visibleItemCount + RESULTS_PAGE_SIZE);
+      visibleItemCount = Math.min(filteredItems.length, visibleItemCount + RESULTS_PAGE_SIZE);
       renderVisibleItems();
+    });
+    resultTabs.addEventListener("click", event => {
+      const button = event.target.closest(".result-tab");
+      if (!button) return;
+      applyResultTab(button.dataset.tab || "all", { resetVisible: true });
     });
 
     rows.addEventListener("click", async (event) => {

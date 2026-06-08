@@ -4,6 +4,7 @@ from arabcity_scraper import (
     CATALOG_ROUTES,
     count_episodes_from_html,
     detect_episode_number,
+    extract_episode_links,
     extract_media_items,
     normalize_media_name,
 )
@@ -59,6 +60,17 @@ class ArabCityScraperTests(unittest.TestCase):
         <a href="/e3">مسلسل المؤسس عثمان الحلقة 3 مترجمة</a>
         """
         self.assertEqual(count_episodes_from_html(detail_html), 12)
+
+    def test_extract_episode_links_orders_latest_first(self):
+        detail_html = """
+        <a href="/series/ghost-lawyer">Ghost Lawyer</a>
+        <a href="/watch/ghost-lawyer-1">مسلسل Ghost Lawyer الحلقة 1 مترجمة</a>
+        <a href="/watch/ghost-lawyer-12">مسلسل Ghost Lawyer الحلقة 12 مترجمة</a>
+        <a href="/watch/ghost-lawyer-3">مسلسل Ghost Lawyer الحلقة 3 مترجمة</a>
+        """
+        episodes = extract_episode_links(detail_html, "https://ak.sv/series/ghost-lawyer")
+        self.assertEqual([episode.number for episode in episodes], [12, 3, 1])
+        self.assertEqual(episodes[0].url, "https://ak.sv/watch/ghost-lawyer-12")
 
 
 if __name__ == "__main__":

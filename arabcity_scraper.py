@@ -142,6 +142,22 @@ class MediaItem:
         }
 
 
+@dataclass(frozen=True)
+class EpisodeLink:
+    title: str
+    url: str
+    number: int | None = None
+    image: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "number": self.number,
+            "image": self.image,
+        }
+
+
 class LinkExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -479,6 +495,66 @@ def count_episodes_from_html(document: str) -> int | None:
     return max(episodes) if episodes else None
 
 
+def is_allowed_source_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    host = parsed.netloc.casefold()
+    allowed_hosts = {
+        urlparse(base_url).netloc.casefold()
+        for provider in ("akwam", "alooytv")
+        for base_url in provider_bases(provider)
+        if urlparse(base_url).netloc
+    }
+    return any(host == allowed or host.endswith("." + allowed) for allowed in allowed_hosts)
+
+
+def looks_like_episode_link(title: str, url: str) -> bool:
+    if detect_episode_number(title) is not None:
+        return True
+    path = urlparse(url).path.casefold()
+    return bool(re.search(r"/(?:episode|episodes|watch|video|videos)(?:/|$)", path))
+
+
+def extract_episode_links(document: str, page_source_url: str) -> list[EpisodeLink]:
+    episodes: dict[str, EpisodeLink] = {}
+    for token in extract_tokens(document, page_source_url):
+        if token.kind != "link":
+            continue
+        title = normalize_display_title(token.text)
+        if should_skip_title(title) or not looks_like_episode_link(title, token.href):
+            continue
+        key = token.href.rstrip("/")
+        if key in episodes:
+            continue
+        number = detect_episode_number(title)
+        if not title:
+            title = f"Episode {number}" if number else "Watch"
+        episodes[key] = EpisodeLink(title=title, url=token.href, number=number, image=token.image)
+    return sorted(
+        episodes.values(),
+        key=lambda episode: (
+            episode.number is None,
+            -(episode.number or 0),
+            episode.title.casefold(),
+        ),
+    )
+
+
+def scrape_episodes(media_url: str) -> dict[str, object]:
+    if not media_url:
+        raise ValueError("Missing media URL")
+    if not is_allowed_source_url(media_url):
+        raise ValueError("Unsupported media URL")
+    document = fetch_html(media_url)
+    episodes = extract_episode_links(document, media_url)
+    return {
+        "url": media_url,
+        "count": len(episodes),
+        "episodes": [episode.to_dict() for episode in episodes],
+    }
+
+
 def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     merged: dict[str, MediaItem] = {}
     for item in items:
@@ -585,6 +661,11 @@ INDEX_HTML = """<!doctype html>
     .poster-missing { width: 58px; height: 82px; border-radius: 6px; border: 1px solid var(--line); background: linear-gradient(135deg, #e5e7eb, #f8fafc); display: grid; place-items: center; color: #64748b; font-size: 11px; }
     .pill { display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 3px 9px; background: #e6f6f4; color: #0f766e; font-size: 12px; }
     .raw { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .actions { display: grid; gap: 8px; min-width: 150px; }
+    .episodes-button { min-height: 34px; padding: 0 10px; border-radius: 6px; font-size: 13px; }
+    .episode-list { display: grid; gap: 6px; }
+    .episode-link { display: block; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; font-size: 13px; }
+    .inline-error { color: var(--bad); font-size: 12px; }
     @media (max-width: 760px) {
       form { grid-template-columns: 1fr; }
       th:nth-child(5), td:nth-child(5) { display: none; }
@@ -661,10 +742,22 @@ INDEX_HTML = """<!doctype html>
           <td><span class="pill">${item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط"}</span></td>
           <td>${item.kind === "series" ? (item.episode_count || "غير معروف") : "-"}</td>
           <td>${escapeHtml(item.source)}</td>
-          <td><a href="${item.url}" target="_blank" rel="noreferrer">فتح</a></td>
+          <td>${actionsMarkup(item)}</td>
         `;
         rows.appendChild(tr);
       }
+    }
+
+    function actionsMarkup(item) {
+      const openLink = `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">فتح</a>`;
+      if (item.kind !== "series") return `<div class="actions">${openLink}</div>`;
+      return `
+        <div class="actions">
+          ${openLink}
+          <button class="episodes-button" type="button" data-url="${escapeHtml(item.url)}">الحلقات</button>
+          <div class="episode-list"></div>
+        </div>
+      `;
     }
 
     function posterMarkup(item) {
@@ -698,6 +791,38 @@ INDEX_HTML = """<!doctype html>
       }
     });
 
+    rows.addEventListener("click", async (event) => {
+      const button = event.target.closest(".episodes-button");
+      if (!button) return;
+      const list = button.nextElementSibling;
+      if (button.dataset.loaded === "1") {
+        list.hidden = !list.hidden;
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "...";
+      list.innerHTML = "";
+      try {
+        const response = await fetch(`/api/episodes?url=${encodeURIComponent(button.dataset.url)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
+        if (!data.episodes.length) {
+          list.innerHTML = `<a class="episode-link" href="${escapeHtml(button.dataset.url)}" target="_blank" rel="noreferrer">فتح صفحة العمل</a>`;
+        } else {
+          list.innerHTML = data.episodes.map(episode => {
+            const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
+            return `<a class="episode-link" href="${escapeHtml(episode.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+          }).join("");
+        }
+        button.dataset.loaded = "1";
+      } catch (error) {
+        list.innerHTML = `<span class="inline-error">${escapeHtml(error.message)}</span>`;
+      } finally {
+        button.disabled = false;
+        button.textContent = "الحلقات";
+      }
+    });
+
     loadCatalogs().catch(error => setStatus(error.message, true));
   </script>
 </body>
@@ -722,6 +847,14 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
             try:
                 self.send_json(scrape_catalog(catalog, pages=pages, search=search, fetch_details=details))
+            except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/episodes":
+            params = parse_qs(parsed.query)
+            media_url = params.get("url", [""])[0]
+            try:
+                self.send_json(scrape_episodes(media_url))
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return
@@ -773,6 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_parser.add_argument("--details", action="store_true", help="Fetch detail pages to improve episode counts.")
     scrape_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
 
+    episodes_parser = subparsers.add_parser("episodes", help="Extract episode watch links from a media page.")
+    episodes_parser.add_argument("--url", required=True)
+    episodes_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
+
     serve_parser = subparsers.add_parser("serve", help="Run the local web UI.")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
@@ -787,6 +924,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         serve(args.host, args.port)
+        return 0
+    if args.command == "episodes":
+        result = scrape_episodes(args.url)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"{result['count']} episodes")
+            for episode in result["episodes"]:
+                print(f"{episode['number'] or '-':>4} | {episode['title']} | {episode['url']}")
         return 0
     result = scrape_catalog(args.catalog, pages=args.pages, search=args.search, fetch_details=args.details)
     if args.json:

@@ -8,6 +8,7 @@ from arabcity_scraper import (
     extract_media_items,
     is_allowed_source_url,
     normalize_media_name,
+    request_safe_url,
 )
 
 
@@ -77,6 +78,12 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertTrue(is_allowed_source_url("https://current-akwam.example/series/from"))
         self.assertFalse(is_allowed_source_url("http://127.0.0.1:8766/series/from"))
         self.assertFalse(is_allowed_source_url("http://localhost:8766/series/from"))
+
+    def test_request_safe_url_quotes_arabic_paths(self):
+        safe_url = request_safe_url("https://tv.akwam.tv/series/التربية?name=الحلقة 1")
+        self.assertIn("%D8%A7%D9%84%D8%AA%D8%B1%D8%A8%D9%8A%D8%A9", safe_url)
+        self.assertIn("name=%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9%201", safe_url)
+        safe_url.encode("ascii")
 
 
 if __name__ == "__main__":

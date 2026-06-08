@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -26,7 +26,13 @@ USER_AGENT = (
 AKWAM_BASE_URL = os.environ.get("AKWAM_BASE_URL", "https://akwam.cyou").rstrip("/")
 ALOOYTV_BASE_URL = os.environ.get("ALOOYTV_BASE_URL", "https://alooytv.co").rstrip("/")
 REQUEST_TIMEOUT = float(os.environ.get("ARABCITY_TIMEOUT", "20"))
-DEFAULT_AKWAM_BASE_URLS = ("https://ak.sv", "https://akwam.cyou", "https://akwem.com", "https://akwams.org")
+DEFAULT_AKWAM_BASE_URLS = (
+    "https://tv.akwam.tv",
+    "https://ak.sv",
+    "https://akwam.cyou",
+    "https://akwem.com",
+    "https://akwams.org",
+)
 QUALITY_WORDS = "WEB-DL|HDTV|BluRay|WebRip|BRRIP|DVDrip|DVDSCR|HD|HDTS|CAM|BDRIP|HDRIP|HC"
 
 
@@ -300,9 +306,26 @@ def should_skip_title(title: str) -> bool:
     return False
 
 
+def request_safe_url(url: str) -> str:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").encode("idna").decode("ascii")
+    netloc = host
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    if parsed.username:
+        userinfo = quote(parsed.username, safe="")
+        if parsed.password:
+            userinfo = f"{userinfo}:{quote(parsed.password, safe='')}"
+        netloc = f"{userinfo}@{netloc}"
+    path = quote(parsed.path or "/", safe="/%:@")
+    query = quote(parsed.query, safe="=&?/%:+,;@")
+    fragment = quote(parsed.fragment, safe="=&?/%:+,;@")
+    return urlunsplit((parsed.scheme, netloc, path, query, fragment))
+
+
 def fetch_html(url: str) -> str:
     request = Request(
-        url,
+        request_safe_url(url),
         headers={
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -692,10 +715,18 @@ INDEX_HTML = """<!doctype html>
     .episode-list { display: grid; gap: 6px; }
     .episode-link { display: block; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; font-size: 13px; }
     .inline-error { color: var(--bad); font-size: 12px; }
+    .player-panel { display: none; position: sticky; bottom: 0; z-index: 10; margin-top: 18px; border: 1px solid var(--line); border-radius: 8px 8px 0 0; background: #0f172a; box-shadow: 0 -16px 36px rgba(15, 23, 42, .22); overflow: hidden; }
+    .player-panel.active { display: block; }
+    .player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; color: white; }
+    .player-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+    .player-controls { display: flex; gap: 8px; flex: 0 0 auto; }
+    .player-controls a, .player-controls button { min-height: 34px; border-radius: 6px; border: 1px solid #334155; padding: 0 10px; background: #1f2937; color: white; font: inherit; }
+    .player-frame { display: block; width: 100%; height: min(68vh, 720px); border: 0; background: #020617; }
     @media (max-width: 760px) {
       form { grid-template-columns: 1fr; }
       th:nth-child(5), td:nth-child(5) { display: none; }
       table { font-size: 14px; }
+      .player-frame { height: 62vh; }
     }
   </style>
 </head>
@@ -735,11 +766,26 @@ INDEX_HTML = """<!doctype html>
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    <section id="playerPanel" class="player-panel" aria-live="polite">
+      <div class="player-bar">
+        <div id="playerTitle" class="player-title">المشغل</div>
+        <div class="player-controls">
+          <a id="playerExternal" href="#" target="_blank" rel="noreferrer">فتح خارجي</a>
+          <button id="playerClose" type="button">إغلاق</button>
+        </div>
+      </div>
+      <iframe id="episodePlayer" class="player-frame" title="مشغل الحلقة" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer"></iframe>
+    </section>
   </main>
   <script>
     const catalog = document.querySelector("#catalog");
     const rows = document.querySelector("#rows");
     const statusBox = document.querySelector("#status");
+    const playerPanel = document.querySelector("#playerPanel");
+    const episodePlayer = document.querySelector("#episodePlayer");
+    const playerTitle = document.querySelector("#playerTitle");
+    const playerExternal = document.querySelector("#playerExternal");
+    const playerClose = document.querySelector("#playerClose");
 
     function setStatus(text, isError = false) {
       statusBox.textContent = text;
@@ -795,6 +841,19 @@ INDEX_HTML = """<!doctype html>
       return String(value || "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[ch]));
     }
 
+    function openPlayer(url, title) {
+      playerTitle.textContent = title || "المشغل";
+      playerExternal.href = url;
+      episodePlayer.src = url;
+      playerPanel.classList.add("active");
+      playerPanel.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+
+    playerClose.addEventListener("click", () => {
+      episodePlayer.src = "about:blank";
+      playerPanel.classList.remove("active");
+    });
+
     document.querySelector("#scrapeForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       rows.innerHTML = "";
@@ -833,11 +892,11 @@ INDEX_HTML = """<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
         if (!data.episodes.length) {
-          list.innerHTML = `<a class="episode-link" href="${escapeHtml(button.dataset.url)}" target="_blank" rel="noreferrer">فتح صفحة العمل</a>`;
+          list.innerHTML = `<a class="episode-link episode-play" href="${escapeHtml(button.dataset.url)}" data-title="صفحة العمل">مشاهدة هنا</a>`;
         } else {
           list.innerHTML = data.episodes.map(episode => {
             const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-            return `<a class="episode-link" href="${escapeHtml(episode.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}">${escapeHtml(label)}</a>`;
           }).join("");
         }
         button.dataset.loaded = "1";
@@ -847,6 +906,13 @@ INDEX_HTML = """<!doctype html>
         button.disabled = false;
         button.textContent = "الحلقات";
       }
+    });
+
+    rows.addEventListener("click", (event) => {
+      const link = event.target.closest(".episode-play");
+      if (!link) return;
+      event.preventDefault();
+      openPlayer(link.href, link.dataset.title || link.textContent);
     });
 
     loadCatalogs().catch(error => setStatus(error.message, true));

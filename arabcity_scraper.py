@@ -1823,6 +1823,12 @@ def scrape_args_from_query(params: dict[str, list[str]]) -> dict[str, object]:
     }
 
 
+def is_client_disconnect_error(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+        return True
+    return isinstance(exc, OSError) and getattr(exc, "winerror", None) in {10053, 10054, 10058}
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -3390,11 +3396,16 @@ class ArabCityHandler(BaseHTTPRequestHandler):
 
     def send_text(self, body: str, content_type: str, status: int = 200) -> None:
         encoded = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        except OSError as exc:
+            if is_client_disconnect_error(exc):
+                return
+            raise
 
     def send_json(self, payload: dict[str, object], status: int = 200) -> None:
         self.send_text(json.dumps(payload, ensure_ascii=False, indent=2), "application/json; charset=utf-8", status)

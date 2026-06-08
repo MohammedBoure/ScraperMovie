@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from arabcity_scraper import (
+    ArabCityHandler,
     COMPLETE_LIBRARY_CATALOG_ID,
     CATALOG_GROUPS,
     CATALOG_ROUTES,
@@ -492,6 +493,30 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("manifestLoadingMaxRetry", INDEX_HTML)
         self.assertIn("المتصفح لا يدعم تشغيل HLS", INDEX_HTML)
         self.assertIn("تعذر الاتصال بسيرفر البث", INDEX_HTML)
+
+    def test_handler_ignores_client_disconnect_while_sending_response(self):
+        class BrokenWriter:
+            def write(self, _data):
+                raise ConnectionAbortedError(10053, "client aborted")
+
+        class DummyHandler:
+            wfile = BrokenWriter()
+            sent_headers: list[tuple[str, str]] = []
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, key, value):
+                self.sent_headers.append((key, value))
+
+            def end_headers(self):
+                self.headers_ended = True
+
+        handler = DummyHandler()
+        ArabCityHandler.send_text(handler, "payload", "text/plain")
+
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(handler.headers_ended)
 
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)

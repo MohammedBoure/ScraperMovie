@@ -98,8 +98,18 @@ CATALOG_ROUTES: dict[str, CatalogRoute] = {
 }
 
 COMPLETE_LIBRARY_CATALOG_ID = "arabcity-complete-library"
+
+
+def manifest_catalog_ids() -> tuple[str, ...]:
+    return tuple(
+        str(catalog.get("id"))
+        for catalog in MANIFEST["catalogs"]
+        if str(catalog.get("id")) in CATALOG_ROUTES
+    )
+
+
 CATALOG_GROUPS: dict[str, tuple[str, ...]] = {
-    COMPLETE_LIBRARY_CATALOG_ID: tuple(CATALOG_ROUTES),
+    COMPLETE_LIBRARY_CATALOG_ID: manifest_catalog_ids(),
 }
 VIRTUAL_CATALOGS = [
     {"type": "ArabCity-combined", "id": COMPLETE_LIBRARY_CATALOG_ID, "name": "⭐ المكتبة الكاملة: أفلام ومسلسلات"},
@@ -921,21 +931,35 @@ def scrape_episodes(media_url: str) -> dict[str, object]:
 def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     merged: dict[str, MediaItem] = {}
     for item in items:
-        key = f"{item.kind}:{item.name.casefold()}"
+        source_key = "+".join(sorted(source.strip().casefold() for source in item.source.split("+") if source.strip()))
+        key = f"{item.kind}:{source_key}:{item.name.casefold()}"
         current = merged.get(key)
         if not current:
             merged[key] = item
             continue
         if item.image and not current.image:
             current.image = item.image
-        current_sources = {source.strip() for source in current.source.split("+") if source.strip()}
-        if item.source and item.source not in current_sources:
-            current.source = "+".join(sorted([*current_sources, item.source]))
         current.raw_titles.extend(title for title in item.raw_titles if title not in current.raw_titles)
         current.discovered_episodes.update(item.discovered_episodes)
         if item.episode_count and (not current.episode_count or item.episode_count > current.episode_count):
             current.episode_count = item.episode_count
     return list(merged.values())
+
+
+def media_stats(items: Iterable[MediaItem]) -> dict[str, int]:
+    stats = {"total": 0, "movies": 0, "series": 0, "mixed": 0, "sources": 0}
+    sources: set[str] = set()
+    for item in items:
+        stats["total"] += 1
+        if item.kind == "movie":
+            stats["movies"] += 1
+        elif item.kind == "series":
+            stats["series"] += 1
+        else:
+            stats["mixed"] += 1
+        sources.update(source.strip() for source in item.source.split("+") if source.strip())
+    stats["sources"] = len(sources)
+    return stats
 
 
 def media_item_from_payload(payload: dict[str, object]) -> MediaItem:
@@ -990,13 +1014,14 @@ def scrape_catalog_group(catalog_id: str, pages: int = 1, search: str = "", fetc
             if isinstance(payload_items, list):
                 items.extend(media_item_from_payload(item) for item in payload_items if isinstance(item, dict))
     merged_items = merge_items(item for item in items if item.name and item.url)
-    merged_items.sort(key=lambda item: (item.kind != "series", item.name))
+    merged_items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
     return {
         "catalog": catalog_id,
         "catalog_name": "المكتبة الكاملة",
         "source": "combined",
         "urls": fetched_urls,
         "count": len(merged_items),
+        "stats": media_stats(merged_items),
         "errors": errors,
         "items": [item.to_dict() for item in merged_items],
     }
@@ -1057,13 +1082,14 @@ def scrape_single_catalog(
             if count and (not item.episode_count or count > item.episode_count):
                 item.episode_count = count
             time.sleep(0.15)
-    items.sort(key=lambda item: (item.kind != "series", item.name))
+    items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
     return {
         "catalog": catalog_id,
         "catalog_name": route.name,
         "source": route.provider,
         "urls": fetched_urls,
         "count": len(items),
+        "stats": media_stats(items),
         "errors": errors,
         "items": [item.to_dict() for item in items],
     }
@@ -1314,6 +1340,21 @@ INDEX_HTML = """<!doctype html>
       text-align: left;
     }
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 10px;
+      margin: -4px 0 18px;
+    }
+    .stat-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px 12px;
+      background: rgba(255,255,255,.035);
+    }
+    .stat-card strong { display: block; color: var(--ink); font-size: 1.24rem; line-height: 1.1; }
+    .stat-card span { display: block; margin-top: 4px; color: var(--muted); font-size: .78rem; font-weight: 800; }
     .watch-layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
@@ -1513,6 +1554,7 @@ INDEX_HTML = """<!doctype html>
       .control-panel { grid-template-columns: 1fr; }
       .status-row { align-items: stretch; flex-direction: column; }
       .status { justify-content: center; text-align: center; }
+      .stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .media-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
       .card-info { padding: 10px; }
       .card-title { font-size: .88rem; min-height: 42px; }
@@ -1568,6 +1610,7 @@ INDEX_HTML = """<!doctype html>
         <h2 class="section-title">النتائج</h2>
         <div id="status" class="status">جاهز.</div>
       </div>
+      <div id="statsGrid" class="stats-grid" aria-live="polite"></div>
       <div class="watch-layout">
         <div id="rows" class="media-grid"></div>
         <section id="playerPanel" class="player-panel" aria-live="polite">
@@ -1591,6 +1634,7 @@ INDEX_HTML = """<!doctype html>
   <script>
     const catalog = document.querySelector("#catalog");
     const rows = document.querySelector("#rows");
+    const statsGrid = document.querySelector("#statsGrid");
     const statusBox = document.querySelector("#status");
     const playerPanel = document.querySelector("#playerPanel");
     const episodeVideo = document.querySelector("#episodeVideo");
@@ -1610,7 +1654,18 @@ INDEX_HTML = """<!doctype html>
       statusBox.className = isError ? "status error" : "status";
     }
 
+    function renderStats(stats = {}) {
+      const values = [
+        ["الإجمالي", stats.total || 0],
+        ["الأفلام", stats.movies || 0],
+        ["المسلسلات", stats.series || 0],
+        ["المصادر", stats.sources || 0],
+      ];
+      statsGrid.innerHTML = values.map(([label, value]) => `<div class="stat-card"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    }
+
     function renderLoadingCards(count = 12) {
+      renderStats();
       rows.innerHTML = Array.from({ length: count }, () => `
         <div class="skeleton-card">
           <div class="skeleton-poster"></div>
@@ -1653,9 +1708,12 @@ INDEX_HTML = """<!doctype html>
         const response = await fetch(`/api/scrape?${params}`, { signal: autoLoadController.signal });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر تحميل المكتبة");
+        renderStats(data.stats || { total: data.count || 0 });
         renderItems(data.items);
         const suffix = data.errors.length ? ` مع ${data.errors.length} أخطاء` : "";
-        setStatus(`المكتبة جاهزة: ${data.count} نتيجة من ${data.catalog_name}${suffix}.`);
+        const stats = data.stats || {};
+        const detail = `(${stats.movies || 0} فيلم، ${stats.series || 0} مسلسل)`;
+        setStatus(`المكتبة جاهزة: ${data.count} نتيجة ${detail} من ${data.catalog_name}${suffix}.`);
       } catch (error) {
         if (error.name === "AbortError") return;
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;

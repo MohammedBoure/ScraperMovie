@@ -3,7 +3,9 @@ from unittest.mock import patch
 
 from arabcity_scraper import (
     COMPLETE_LIBRARY_CATALOG_ID,
+    CATALOG_GROUPS,
     CATALOG_ROUTES,
+    MANIFEST,
     PlayerLink,
     available_catalogs,
     count_episodes_from_html,
@@ -14,6 +16,7 @@ from arabcity_scraper import (
     extract_player_links,
     is_allowed_source_url,
     media_item_from_addon_meta,
+    manifest_catalog_ids,
     normalize_media_name,
     player_from_addon_stream,
     request_safe_url,
@@ -156,6 +159,11 @@ class ArabCityScraperTests(unittest.TestCase):
         catalogs = available_catalogs()
         self.assertEqual(catalogs[0]["id"], COMPLETE_LIBRARY_CATALOG_ID)
 
+    def test_complete_library_group_uses_supported_manifest_catalogs(self):
+        expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)
+        self.assertEqual(manifest_catalog_ids(), expected)
+        self.assertEqual(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID], expected)
+
     def test_complete_library_scrapes_all_catalogs_and_merges_duplicates(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
             self.assertEqual(pages, 2)
@@ -214,13 +222,17 @@ class ArabCityScraperTests(unittest.TestCase):
         with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
             result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, pages=2, search="from")
 
-        self.assertEqual(mocked.call_count, len(CATALOG_ROUTES))
-        self.assertEqual(result["count"], 2)
-        by_name = {item["name"]: item for item in result["items"]}
-        self.assertEqual(by_name["From"]["episode_count"], 8)
-        self.assertEqual(by_name["From"]["image"], "https://img.example/from.jpg")
-        self.assertEqual(by_name["From"]["source"], "akwam+alooytv")
-        self.assertEqual(by_name["Inception"]["kind"], "movie")
+        self.assertEqual(mocked.call_count, len(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID]))
+        self.assertEqual(result["count"], 3)
+        by_key = {(item["name"], item["source"]): item for item in result["items"]}
+        self.assertEqual(by_key[("From", "akwam")]["episode_count"], 7)
+        self.assertEqual(by_key[("From", "alooytv")]["episode_count"], 8)
+        self.assertEqual(by_key[("From", "alooytv")]["image"], "https://img.example/from.jpg")
+        self.assertEqual(by_key[("Inception", "akwam")]["kind"], "movie")
+        self.assertEqual(result["stats"]["total"], 3)
+        self.assertEqual(result["stats"]["movies"], 1)
+        self.assertEqual(result["stats"]["series"], 2)
+        self.assertEqual(result["stats"]["sources"], 2)
 
 
 if __name__ == "__main__":

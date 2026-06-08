@@ -55,7 +55,7 @@ EPISODE_META_CACHE: OrderedDict[tuple[str, str, str], tuple[list["EpisodeLink"],
 EPISODE_META_CACHE_LOCK = Lock()
 EPISODE_LINKS_CACHE: OrderedDict[str, tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_LINKS_CACHE_LOCK = Lock()
-CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool], dict[str, object]] = OrderedDict()
+CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool, str], dict[str, object]] = OrderedDict()
 CATALOG_CACHE_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 ARABIC_SEARCH_TRANSLATION = str.maketrans(
@@ -135,6 +135,7 @@ CATALOG_ROUTES: dict[str, CatalogRoute] = {
 }
 
 COMPLETE_LIBRARY_CATALOG_ID = "arabcity-complete-library"
+SOURCE_FILTERS = {"all", "akwam", "alooytv"}
 
 
 def manifest_catalog_ids() -> tuple[str, ...]:
@@ -159,6 +160,19 @@ def available_catalogs() -> list[dict[str, str]]:
 
 def all_catalog_ids() -> tuple[str, ...]:
     return (*CATALOG_GROUPS, *CATALOG_ROUTES)
+
+
+def normalize_source_filter(source_filter: str = "all") -> str:
+    value = clean_spaces(source_filter).casefold()
+    return value if value in SOURCE_FILTERS else "all"
+
+
+def catalog_matches_source_filter(catalog_id: str, source_filter: str = "all") -> bool:
+    source_filter = normalize_source_filter(source_filter)
+    if source_filter == "all":
+        return True
+    route = CATALOG_ROUTES.get(catalog_id)
+    return bool(route and route.provider == source_filter)
 
 
 NOISE_TITLES = {
@@ -1328,8 +1342,16 @@ def catalog_cache_key(
     search: str = "",
     fetch_details: bool = False,
     playable_only: bool = False,
-) -> tuple[str, int, str, bool, bool]:
-    return catalog_id, max(1, min(int(pages), 25)), normalize_search_text(search), bool(fetch_details), bool(playable_only)
+    source_filter: str = "all",
+) -> tuple[str, int, str, bool, bool, str]:
+    return (
+        catalog_id,
+        max(1, min(int(pages), 25)),
+        normalize_search_text(search),
+        bool(fetch_details),
+        bool(playable_only),
+        normalize_source_filter(source_filter),
+    )
 
 
 def trim_catalog_cache(limit: int | None = None) -> None:
@@ -1343,7 +1365,7 @@ def clear_catalog_cache() -> None:
         CATALOG_CACHE.clear()
 
 
-def cached_catalog_result(key: tuple[str, int, str, bool, bool]) -> dict[str, object] | None:
+def cached_catalog_result(key: tuple[str, int, str, bool, bool, str]) -> dict[str, object] | None:
     with CATALOG_CACHE_LOCK:
         cached = CATALOG_CACHE.get(key)
         if cached is not None:
@@ -1355,7 +1377,7 @@ def cached_catalog_result(key: tuple[str, int, str, bool, bool]) -> dict[str, ob
     return result
 
 
-def store_catalog_result(key: tuple[str, int, str, bool, bool], result: dict[str, object]) -> dict[str, object]:
+def store_catalog_result(key: tuple[str, int, str, bool, bool, str], result: dict[str, object]) -> dict[str, object]:
     stored = deepcopy(result)
     stored["cached"] = False
     with CATALOG_CACHE_LOCK:
@@ -1371,14 +1393,30 @@ def scrape_catalog_group(
     search: str = "",
     fetch_details: bool = False,
     playable_only: bool = False,
+    source_filter: str = "all",
 ) -> dict[str, object]:
     child_catalogs = CATALOG_GROUPS.get(catalog_id)
     if not child_catalogs:
         raise ValueError(f"Unknown catalog id: {catalog_id}")
+    source_filter = normalize_source_filter(source_filter)
+    child_catalogs = tuple(child_id for child_id in child_catalogs if catalog_matches_source_filter(child_id, source_filter))
     pages = max(1, min(int(pages), 25))
     errors: list[str] = []
     fetched_urls: list[str] = []
     items: list[MediaItem] = []
+    if not child_catalogs:
+        return {
+            "catalog": catalog_id,
+            "catalog_name": "المكتبة الكاملة",
+            "source": "combined",
+            "source_filter": source_filter,
+            "urls": [],
+            "count": 0,
+            "playable_only": playable_only,
+            "stats": media_stats([]),
+            "errors": [],
+            "items": [],
+        }
     try:
         requested_workers = int(os.environ.get("ARABCITY_GROUP_WORKERS", "8"))
     except ValueError:
@@ -1416,6 +1454,7 @@ def scrape_catalog_group(
         "catalog": catalog_id,
         "catalog_name": "المكتبة الكاملة",
         "source": "combined",
+        "source_filter": source_filter,
         "urls": fetched_urls,
         "count": len(merged_items),
         "playable_only": playable_only,
@@ -1502,6 +1541,7 @@ def scrape_catalog(
     search: str = "",
     fetch_details: bool = False,
     playable_only: bool = False,
+    source_filter: str = "all",
 ) -> dict[str, object]:
     key = catalog_cache_key(
         catalog_id,
@@ -1509,12 +1549,13 @@ def scrape_catalog(
         search=search,
         fetch_details=fetch_details,
         playable_only=playable_only,
+        source_filter=source_filter,
     )
     cached = cached_catalog_result(key)
     if cached is not None:
         return cached
 
-    catalog_id, pages, search, fetch_details, playable_only = key
+    catalog_id, pages, search, fetch_details, playable_only, source_filter = key
     if catalog_id in CATALOG_GROUPS:
         result = scrape_catalog_group(
             catalog_id,
@@ -1522,15 +1563,32 @@ def scrape_catalog(
             search=search,
             fetch_details=fetch_details,
             playable_only=playable_only,
+            source_filter=source_filter,
         )
     else:
-        result = scrape_single_catalog(
-            catalog_id,
-            pages=pages,
-            search=search,
-            fetch_details=fetch_details,
-            playable_only=playable_only,
-        )
+        route = CATALOG_ROUTES.get(catalog_id)
+        if route and not catalog_matches_source_filter(catalog_id, source_filter):
+            result = {
+                "catalog": catalog_id,
+                "catalog_name": route.name,
+                "source": route.provider,
+                "source_filter": source_filter,
+                "urls": [],
+                "count": 0,
+                "playable_only": playable_only,
+                "stats": media_stats([]),
+                "errors": [],
+                "items": [],
+            }
+        else:
+            result = scrape_single_catalog(
+                catalog_id,
+                pages=pages,
+                search=search,
+                fetch_details=fetch_details,
+                playable_only=playable_only,
+            )
+            result["source_filter"] = source_filter
     return store_catalog_result(key, result)
 
 
@@ -2050,6 +2108,13 @@ INDEX_HTML = """<!doctype html>
           <label>الكتالوج
             <select id="catalog"></select>
           </label>
+          <label>المصادر
+            <select id="sourceFilter">
+              <option value="all">الكل</option>
+              <option value="akwam">Akwam فقط</option>
+              <option value="alooytv">AlooyTV فقط</option>
+            </select>
+          </label>
           <label>عدد الصفحات
             <input id="pages" type="number" min="1" max="25" value="1">
           </label>
@@ -2198,6 +2263,7 @@ INDEX_HTML = """<!doctype html>
       setStatus(playableOnly ? "جاري فحص روابط التشغيل المباشر..." : (initial ? "جاري تجهيز المكتبة تلقائيا..." : "جاري تحديث المكتبة..."));
       const params = new URLSearchParams({
         catalog: catalog.value,
+        source_filter: document.querySelector("#sourceFilter").value || "all",
         pages: document.querySelector("#pages").value || "1",
         search: document.querySelector("#search").value || "",
         details: document.querySelector("#details").checked ? "1" : "0",
@@ -2693,6 +2759,7 @@ INDEX_HTML = """<!doctype html>
       loadItems();
     });
     document.querySelector("#pages").addEventListener("change", () => loadItems());
+    document.querySelector("#sourceFilter").addEventListener("change", () => loadItems());
     document.querySelector("#details").addEventListener("change", () => loadItems());
     document.querySelector("#playableOnly").addEventListener("change", () => loadItems());
     document.querySelector("#search").addEventListener("input", () => {
@@ -2798,6 +2865,7 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             search = params.get("search", [""])[0]
             details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
             playable_only = params.get("playable_only", ["0"])[0] in {"1", "true", "yes"}
+            source_filter = params.get("source_filter", ["all"])[0]
             try:
                 self.send_json(
                     scrape_catalog(
@@ -2806,6 +2874,7 @@ class ArabCityHandler(BaseHTTPRequestHandler):
                         search=search,
                         fetch_details=details,
                         playable_only=playable_only,
+                        source_filter=source_filter,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.

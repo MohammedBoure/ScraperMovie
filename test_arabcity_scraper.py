@@ -381,6 +381,12 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("جاهزة للتشغيل", INDEX_HTML)
         self.assertIn("stats.with_episodes", INDEX_HTML)
 
+    def test_index_includes_source_filter_control(self):
+        self.assertIn('id="sourceFilter"', INDEX_HTML)
+        self.assertIn('value="akwam"', INDEX_HTML)
+        self.assertIn('value="alooytv"', INDEX_HTML)
+        self.assertIn("source_filter:", INDEX_HTML)
+
     def test_index_uses_check_player_badges(self):
         self.assertIn("/api/check-player", INDEX_HTML)
         self.assertIn("playerCheckCache", INDEX_HTML)
@@ -472,6 +478,31 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(normal["count"], 2)
         self.assertEqual(playable["count"], 1)
         self.assertTrue(normal_again["cached"])
+
+    def test_scrape_catalog_cache_separates_source_filter(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, playable_only=False):
+            return {
+                "catalog": catalog_id,
+                "catalog_name": "Movies",
+                "source": "akwam",
+                "urls": [],
+                "count": 1,
+                "playable_only": playable_only,
+                "stats": {"total": 1},
+                "errors": [],
+                "items": [],
+            }
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
+            all_sources = scrape_catalog("akoam-movies-all", source_filter="all")
+            akwam_only = scrape_catalog("akoam-movies-all", source_filter="akwam")
+            alooy_only = scrape_catalog("akoam-movies-all", source_filter="alooytv")
+
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(all_sources["count"], 1)
+        self.assertEqual(akwam_only["count"], 1)
+        self.assertEqual(alooy_only["count"], 0)
+        self.assertEqual(alooy_only["source_filter"], "alooytv")
 
     def test_scrape_catalog_filters_addon_items_with_normalized_search_fields(self):
         items = [
@@ -569,6 +600,36 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["stats"]["series"], 2)
         self.assertEqual(result["stats"]["with_episodes"], 2)
         self.assertEqual(result["stats"]["sources"], 2)
+
+    def test_complete_library_respects_source_filter(self):
+        called: list[str] = []
+
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            called.append(catalog_id)
+            route = CATALOG_ROUTES[catalog_id]
+            return {
+                "urls": [f"https://example.test/{catalog_id}"],
+                "errors": [],
+                "items": [
+                    {
+                        "name": catalog_id,
+                        "kind": route.kind,
+                        "url": f"https://{route.provider}.example/{catalog_id}",
+                        "source": route.provider,
+                        "image": "",
+                        "episode_count": None,
+                        "raw_titles": [catalog_id],
+                    }
+                ],
+            }
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single):
+            result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, source_filter="alooytv")
+
+        self.assertTrue(called)
+        self.assertTrue(all(CATALOG_ROUTES[catalog_id].provider == "alooytv" for catalog_id in called))
+        self.assertEqual(result["source_filter"], "alooytv")
+        self.assertEqual({item["source"] for item in result["items"]}, {"alooytv"})
 
     def test_complete_library_playable_only_filters_after_merge(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):

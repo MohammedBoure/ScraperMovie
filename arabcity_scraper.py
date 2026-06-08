@@ -162,6 +162,9 @@ class MediaItem:
     source: str
     image: str = ""
     episode_count: int | None = None
+    playable: bool = False
+    playable_checked: bool = False
+    playable_streams: int = 0
     discovered_episodes: set[int] = field(default_factory=set)
     raw_titles: list[str] = field(default_factory=list)
 
@@ -173,6 +176,9 @@ class MediaItem:
             "source": self.source,
             "image": self.image,
             "episode_count": self.episode_count,
+            "playable": self.playable,
+            "playable_checked": self.playable_checked,
+            "playable_streams": self.playable_streams,
             "raw_titles": self.raw_titles[:5],
         }
 
@@ -823,6 +829,66 @@ def direct_video_players(players: Iterable[PlayerLink]) -> list[PlayerLink]:
     return [player for player in players if player.kind == "video" and is_allowed_source_url(player.url)]
 
 
+def item_sources(source: str) -> list[str]:
+    sources = [part.strip() for part in source.split("+") if part.strip()]
+    return sources or ["akwam"]
+
+
+def playable_stream_count(item: MediaItem) -> int:
+    for source in item_sources(item.source):
+        item_type = addon_type_for_source(source)
+        if item.kind in {"movie", "mixed"}:
+            stream_id = build_addon_item_id(item.url, kind="movie", source=source, name=item.name)
+            try:
+                players = direct_video_players(player_from_addon_stream(stream_id, item_type=item_type))
+            except RuntimeError:
+                players = []
+            if players:
+                return len(players)
+        if item.kind in {"series", "mixed"}:
+            try:
+                episodes = addon_episode_links(item.url, source=source, name=item.name)
+            except RuntimeError:
+                episodes = []
+            for episode in episodes:
+                if not episode.stream_id:
+                    continue
+                try:
+                    players = direct_video_players(player_from_addon_stream(episode.stream_id, item_type=item_type))
+                except RuntimeError:
+                    continue
+                if players:
+                    return len(players)
+    return 0
+
+
+def mark_playability(item: MediaItem) -> MediaItem:
+    try:
+        count = playable_stream_count(item)
+    except Exception:  # noqa: BLE001 - one bad stream check should only exclude that item.
+        count = 0
+    item.playable_checked = True
+    item.playable_streams = count
+    item.playable = count > 0
+    return item
+
+
+def filter_playable_items(items: list[MediaItem]) -> list[MediaItem]:
+    if not items:
+        return []
+    try:
+        requested_workers = int(os.environ.get("ARABCITY_PLAYABLE_WORKERS", "10"))
+    except ValueError:
+        requested_workers = 10
+    workers = max(1, min(len(items), requested_workers))
+    checked: list[MediaItem] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(mark_playability, item) for item in items]
+        for future in as_completed(futures):
+            checked.append(future.result())
+    return [item for item in checked if item.playable]
+
+
 def media_item_from_addon_meta(meta: dict[str, object], route: CatalogRoute) -> MediaItem | None:
     item_id = str(meta.get("id") or "")
     url = media_url_from_addon_id(item_id)
@@ -947,7 +1013,7 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
 
 
 def media_stats(items: Iterable[MediaItem]) -> dict[str, int]:
-    stats = {"total": 0, "movies": 0, "series": 0, "mixed": 0, "sources": 0}
+    stats = {"total": 0, "movies": 0, "series": 0, "mixed": 0, "sources": 0, "playable": 0, "checked": 0}
     sources: set[str] = set()
     for item in items:
         stats["total"] += 1
@@ -957,6 +1023,10 @@ def media_stats(items: Iterable[MediaItem]) -> dict[str, int]:
             stats["series"] += 1
         else:
             stats["mixed"] += 1
+        if item.playable_checked:
+            stats["checked"] += 1
+        if item.playable:
+            stats["playable"] += 1
         sources.update(source.strip() for source in item.source.split("+") if source.strip())
     stats["sources"] = len(sources)
     return stats
@@ -972,11 +1042,20 @@ def media_item_from_payload(payload: dict[str, object]) -> MediaItem:
         source=str(payload.get("source") or ""),
         image=str(payload.get("image") or ""),
         episode_count=int(episode_count) if isinstance(episode_count, int) else None,
+        playable=bool(payload.get("playable") or False),
+        playable_checked=bool(payload.get("playable_checked") or False),
+        playable_streams=int(payload.get("playable_streams") or 0),
         raw_titles=[str(title) for title in raw_titles] if isinstance(raw_titles, list) else [],
     )
 
 
-def scrape_catalog_group(catalog_id: str, pages: int = 1, search: str = "", fetch_details: bool = False) -> dict[str, object]:
+def scrape_catalog_group(
+    catalog_id: str,
+    pages: int = 1,
+    search: str = "",
+    fetch_details: bool = False,
+    playable_only: bool = False,
+) -> dict[str, object]:
     child_catalogs = CATALOG_GROUPS.get(catalog_id)
     if not child_catalogs:
         raise ValueError(f"Unknown catalog id: {catalog_id}")
@@ -1014,6 +1093,8 @@ def scrape_catalog_group(catalog_id: str, pages: int = 1, search: str = "", fetc
             if isinstance(payload_items, list):
                 items.extend(media_item_from_payload(item) for item in payload_items if isinstance(item, dict))
     merged_items = merge_items(item for item in items if item.name and item.url)
+    if playable_only:
+        merged_items = filter_playable_items(merged_items)
     merged_items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
     return {
         "catalog": catalog_id,
@@ -1021,6 +1102,7 @@ def scrape_catalog_group(catalog_id: str, pages: int = 1, search: str = "", fetc
         "source": "combined",
         "urls": fetched_urls,
         "count": len(merged_items),
+        "playable_only": playable_only,
         "stats": media_stats(merged_items),
         "errors": errors,
         "items": [item.to_dict() for item in merged_items],
@@ -1033,6 +1115,7 @@ def scrape_single_catalog(
     search: str = "",
     fetch_details: bool = False,
     fallback_to_site: bool = True,
+    playable_only: bool = False,
 ) -> dict[str, object]:
     route = CATALOG_ROUTES.get(catalog_id)
     if not route:
@@ -1082,6 +1165,8 @@ def scrape_single_catalog(
             if count and (not item.episode_count or count > item.episode_count):
                 item.episode_count = count
             time.sleep(0.15)
+    if playable_only:
+        items = filter_playable_items(items)
     items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
     return {
         "catalog": catalog_id,
@@ -1089,16 +1174,23 @@ def scrape_single_catalog(
         "source": route.provider,
         "urls": fetched_urls,
         "count": len(items),
+        "playable_only": playable_only,
         "stats": media_stats(items),
         "errors": errors,
         "items": [item.to_dict() for item in items],
     }
 
 
-def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_details: bool = False) -> dict[str, object]:
+def scrape_catalog(
+    catalog_id: str,
+    pages: int = 1,
+    search: str = "",
+    fetch_details: bool = False,
+    playable_only: bool = False,
+) -> dict[str, object]:
     if catalog_id in CATALOG_GROUPS:
-        return scrape_catalog_group(catalog_id, pages=pages, search=search, fetch_details=fetch_details)
-    return scrape_single_catalog(catalog_id, pages=pages, search=search, fetch_details=fetch_details)
+        return scrape_catalog_group(catalog_id, pages=pages, search=search, fetch_details=fetch_details, playable_only=playable_only)
+    return scrape_single_catalog(catalog_id, pages=pages, search=search, fetch_details=fetch_details, playable_only=playable_only)
 
 
 INDEX_HTML = """<!doctype html>
@@ -1259,6 +1351,7 @@ INDEX_HTML = """<!doctype html>
       box-shadow: 0 20px 46px rgba(0,0,0,.26);
     }
     .control-panel label:first-child,
+    .control-panel .playable-toggle,
     .control-panel .search-field,
     .control-panel .primary-button { grid-column: 1 / -1; }
     label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
@@ -1342,7 +1435,7 @@ INDEX_HTML = """<!doctype html>
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0,1fr));
+      grid-template-columns: repeat(5, minmax(0,1fr));
       gap: 10px;
       margin: -4px 0 18px;
     }
@@ -1598,6 +1691,10 @@ INDEX_HTML = """<!doctype html>
             <input id="details" type="checkbox">
             تفاصيل أعمق
           </label>
+          <label class="toggle playable-toggle">
+            <input id="playableOnly" type="checkbox">
+            جاهز للتشغيل فقط
+          </label>
           <label class="search-field">بحث داخل النتائج
             <input id="search" type="search" placeholder="اختياري">
           </label>
@@ -1655,10 +1752,12 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderStats(stats = {}) {
+      const playableValue = stats.checked ? (stats.playable || 0) : "—";
       const values = [
         ["الإجمالي", stats.total || 0],
         ["الأفلام", stats.movies || 0],
         ["المسلسلات", stats.series || 0],
+        ["جاهز", playableValue],
         ["المصادر", stats.sources || 0],
       ];
       statsGrid.innerHTML = values.map(([label, value]) => `<div class="stat-card"><strong>${value}</strong><span>${label}</span></div>`).join("");
@@ -1697,12 +1796,14 @@ INDEX_HTML = """<!doctype html>
       if (autoLoadController) autoLoadController.abort();
       autoLoadController = new AbortController();
       renderLoadingCards(initial ? 14 : 10);
-      setStatus(initial ? "جاري تجهيز المكتبة تلقائيا..." : "جاري تحديث المكتبة...");
+      const playableOnly = document.querySelector("#playableOnly").checked;
+      setStatus(playableOnly ? "جاري فحص روابط التشغيل المباشر..." : (initial ? "جاري تجهيز المكتبة تلقائيا..." : "جاري تحديث المكتبة..."));
       const params = new URLSearchParams({
         catalog: catalog.value,
         pages: document.querySelector("#pages").value || "1",
         search: document.querySelector("#search").value || "",
         details: document.querySelector("#details").checked ? "1" : "0",
+        playable_only: playableOnly ? "1" : "0",
       });
       try {
         const response = await fetch(`/api/scrape?${params}`, { signal: autoLoadController.signal });
@@ -1713,7 +1814,8 @@ INDEX_HTML = """<!doctype html>
         const suffix = data.errors.length ? ` مع ${data.errors.length} أخطاء` : "";
         const stats = data.stats || {};
         const detail = `(${stats.movies || 0} فيلم، ${stats.series || 0} مسلسل)`;
-        setStatus(`المكتبة جاهزة: ${data.count} نتيجة ${detail} من ${data.catalog_name}${suffix}.`);
+        const prefix = data.playable_only ? "جاهز للتشغيل فقط" : "المكتبة جاهزة";
+        setStatus(`${prefix}: ${data.count} نتيجة ${detail} من ${data.catalog_name}${suffix}.`);
       } catch (error) {
         if (error.name === "AbortError") return;
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;
@@ -1761,11 +1863,13 @@ INDEX_HTML = """<!doctype html>
     function actionsMarkup(item) {
       const title = escapeHtml(item.name);
       const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>تشغيل داخل الصفحة</span></a>`;
-      if (item.kind !== "series") return `<div class="actions">${watchLink}<span class="direct-chip"><i data-lucide="monitor-play"></i>مشغل مباشر فقط</span></div>`;
+      const directText = item.playable_checked ? "تم التحقق من التشغيل" : "يتحقق عند التشغيل";
+      const directIcon = item.playable_checked ? "badge-check" : "monitor-play";
+      if (item.kind !== "series") return `<div class="actions">${watchLink}<span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span></div>`;
       return `
         <div class="actions">
           <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
-          <span class="direct-chip"><i data-lucide="monitor-play"></i>الحلقات تعمل هنا عند توفر رابط مباشر</span>
+          <span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span>
           <div class="episode-list"></div>
         </div>
       `;
@@ -1850,6 +1954,7 @@ INDEX_HTML = """<!doctype html>
     catalog.addEventListener("change", () => loadItems());
     document.querySelector("#pages").addEventListener("change", () => loadItems());
     document.querySelector("#details").addEventListener("change", () => loadItems());
+    document.querySelector("#playableOnly").addEventListener("change", () => loadItems());
     document.querySelector("#search").addEventListener("input", () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => loadItems(), 420);
@@ -1941,8 +2046,17 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             pages = int(params.get("pages", ["1"])[0] or "1")
             search = params.get("search", [""])[0]
             details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
+            playable_only = params.get("playable_only", ["0"])[0] in {"1", "true", "yes"}
             try:
-                self.send_json(scrape_catalog(catalog, pages=pages, search=search, fetch_details=details))
+                self.send_json(
+                    scrape_catalog(
+                        catalog,
+                        pages=pages,
+                        search=search,
+                        fetch_details=details,
+                        playable_only=playable_only,
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return
@@ -2009,6 +2123,7 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_parser.add_argument("--pages", type=int, default=1)
     scrape_parser.add_argument("--search", default="")
     scrape_parser.add_argument("--details", action="store_true", help="Fetch detail pages to improve episode counts.")
+    scrape_parser.add_argument("--playable-only", action="store_true", help="Only keep items with a verified direct video stream.")
     scrape_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
 
     episodes_parser = subparsers.add_parser("episodes", help="Extract episode watch links from a media page.")
@@ -2039,7 +2154,13 @@ def main(argv: list[str] | None = None) -> int:
             for episode in result["episodes"]:
                 print(f"{episode['number'] or '-':>4} | {episode['title']} | {episode['url']}")
         return 0
-    result = scrape_catalog(args.catalog, pages=args.pages, search=args.search, fetch_details=args.details)
+    result = scrape_catalog(
+        args.catalog,
+        pages=args.pages,
+        search=args.search,
+        fetch_details=args.details,
+        playable_only=args.playable_only,
+    )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:

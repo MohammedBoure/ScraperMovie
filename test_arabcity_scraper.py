@@ -6,6 +6,7 @@ from arabcity_scraper import (
     CATALOG_GROUPS,
     CATALOG_ROUTES,
     MANIFEST,
+    MediaItem,
     PlayerLink,
     available_catalogs,
     count_episodes_from_html,
@@ -14,6 +15,7 @@ from arabcity_scraper import (
     extract_episode_links,
     extract_media_items,
     extract_player_links,
+    filter_playable_items,
     is_allowed_source_url,
     media_item_from_addon_meta,
     manifest_catalog_ids,
@@ -133,6 +135,32 @@ class ArabCityScraperTests(unittest.TestCase):
                 scrape_player("https://tv.akwam.tv/watch/episode-1")
         self.assertIn("رابط فيديو مباشر", str(context.exception))
 
+    def test_filter_playable_items_keeps_verified_direct_streams(self):
+        items = [
+            MediaItem("Ready Movie", "movie", "https://akwam.example/movie/ready", "akwam"),
+            MediaItem("Dead Movie", "movie", "https://akwam.example/movie/dead", "akwam"),
+        ]
+
+        def fake_stream_count(item):
+            return 2 if item.name == "Ready Movie" else 0
+
+        with patch("arabcity_scraper.playable_stream_count", side_effect=fake_stream_count):
+            result = filter_playable_items(items)
+
+        by_name = {item.name: item for item in result}
+        self.assertEqual(set(by_name), {"Ready Movie"})
+        self.assertTrue(by_name["Ready Movie"].playable)
+        self.assertTrue(by_name["Ready Movie"].playable_checked)
+        self.assertEqual(by_name["Ready Movie"].playable_streams, 2)
+
+    def test_filter_playable_items_excludes_items_with_check_errors(self):
+        items = [MediaItem("Broken Movie", "movie", "https://akwam.example/movie/broken", "akwam")]
+        with patch("arabcity_scraper.playable_stream_count", side_effect=RuntimeError("bad stream")):
+            result = filter_playable_items(items)
+        self.assertEqual(result, [])
+        self.assertTrue(items[0].playable_checked)
+        self.assertFalse(items[0].playable)
+
     def test_stremio_url_encodes_full_id_segment(self):
         url = stremio_url(
             "stream",
@@ -233,6 +261,49 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["stats"]["movies"], 1)
         self.assertEqual(result["stats"]["series"], 2)
         self.assertEqual(result["stats"]["sources"], 2)
+
+    def test_complete_library_playable_only_filters_after_merge(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            if catalog_id == "akoam-movies-all":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "Ready Movie",
+                            "kind": "movie",
+                            "url": "https://akwam.example/movie/ready",
+                            "source": "akwam",
+                            "image": "",
+                            "episode_count": None,
+                            "raw_titles": ["Ready Movie"],
+                        },
+                        {
+                            "name": "Dead Movie",
+                            "kind": "movie",
+                            "url": "https://akwam.example/movie/dead",
+                            "source": "akwam",
+                            "image": "",
+                            "episode_count": None,
+                            "raw_titles": ["Dead Movie"],
+                        },
+                    ],
+                }
+            return {"urls": [f"https://example.test/{catalog_id}"], "errors": [], "items": []}
+
+        def fake_stream_count(item):
+            return 1 if item.name == "Ready Movie" else 0
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single):
+            with patch("arabcity_scraper.playable_stream_count", side_effect=fake_stream_count):
+                result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, playable_only=True)
+
+        self.assertTrue(result["playable_only"])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["items"][0]["name"], "Ready Movie")
+        self.assertTrue(result["items"][0]["playable"])
+        self.assertEqual(result["stats"]["checked"], 1)
+        self.assertEqual(result["stats"]["playable"], 1)
 
 
 if __name__ == "__main__":

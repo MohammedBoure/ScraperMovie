@@ -25,6 +25,8 @@ USER_AGENT = (
 AKWAM_BASE_URL = os.environ.get("AKWAM_BASE_URL", "https://akwam.cyou").rstrip("/")
 ALOOYTV_BASE_URL = os.environ.get("ALOOYTV_BASE_URL", "https://alooytv.co").rstrip("/")
 REQUEST_TIMEOUT = float(os.environ.get("ARABCITY_TIMEOUT", "20"))
+DEFAULT_AKWAM_BASE_URLS = ("https://ak.sv", "https://akwam.cyou", "https://akwem.com", "https://akwams.org")
+QUALITY_WORDS = "WEB-DL|HDTV|BluRay|WebRip|BRRIP|DVDrip|DVDSCR|HD|HDTS|CAM|BDRIP|HDRIP|HC"
 
 
 MANIFEST = {
@@ -88,6 +90,8 @@ CATALOG_ROUTES: dict[str, CatalogRoute] = {
 
 
 NOISE_TITLES = {
+    "watch",
+    "favorite",
     "",
     "مشاهدة",
     "شاهد الآن",
@@ -166,6 +170,49 @@ class LinkExtractor(HTMLParser):
             self._active.pop()
 
 
+@dataclass
+class Token:
+    kind: str
+    text: str
+    href: str = ""
+
+
+class TokenExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tokens: list[Token] = []
+        self._link_href: str | None = None
+        self._link_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "a" and attrs_map.get("href"):
+            self._link_href = attrs_map["href"]
+            self._link_text = []
+            title = attrs_map.get("title") or attrs_map.get("aria-label")
+            if title:
+                self._link_text.append(title)
+        elif tag.lower() == "img" and self._link_href:
+            alt = attrs_map.get("alt") or attrs_map.get("title")
+            if alt:
+                self._link_text.append(alt)
+
+    def handle_data(self, data: str) -> None:
+        text = clean_spaces(data)
+        if not text:
+            return
+        if self._link_href:
+            self._link_text.append(text)
+        else:
+            self.tokens.append(Token("text", text))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._link_href:
+            self.tokens.append(Token("link", clean_spaces(" ".join(self._link_text)), self._link_href))
+            self._link_href = None
+            self._link_text = []
+
+
 def clean_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
 
@@ -237,16 +284,49 @@ def fetch_html(url: str) -> str:
         raise RuntimeError(f"Could not fetch {url}: {exc.reason}") from exc
 
 
-def provider_base(provider: str) -> str:
+def unique_values(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        value = value.rstrip("/")
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def provider_bases(provider: str) -> list[str]:
     if provider == "akwam":
-        return AKWAM_BASE_URL
+        env_urls = os.environ.get("AKWAM_BASE_URLS", "")
+        configured = [*(part.strip() for part in env_urls.split(",") if part.strip())]
+        if "AKWAM_BASE_URL" in os.environ:
+            configured.insert(0, AKWAM_BASE_URL)
+        return unique_values([*configured, *DEFAULT_AKWAM_BASE_URLS])
     if provider == "alooytv":
-        return ALOOYTV_BASE_URL
+        return [ALOOYTV_BASE_URL]
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def route_url(route: CatalogRoute) -> str:
-    return urljoin(provider_base(route.provider) + "/", route.path.lstrip("/"))
+def route_paths(route: CatalogRoute) -> list[str]:
+    if route.provider != "akwam":
+        return [route.path]
+    paths: list[str] = []
+    if route.kind == "series":
+        paths.append("/series")
+    elif route.kind == "movie":
+        paths.append("/movies")
+    elif route.path == "/recent":
+        paths.append("/recent")
+    paths.append(route.path)
+    return unique_values(paths)
+
+
+def route_urls(route: CatalogRoute) -> list[str]:
+    urls: list[str] = []
+    for base_url in provider_bases(route.provider):
+        for path in route_paths(route):
+            urls.append(urljoin(base_url + "/", path.lstrip("/")))
+    return unique_values(urls)
 
 
 def page_url(first_page_url: str, page: int) -> str:
@@ -272,6 +352,35 @@ def extract_links(document: str, base_url: str) -> list[Link]:
     return links
 
 
+def extract_tokens(document: str, base_url: str) -> list[Token]:
+    parser = TokenExtractor()
+    parser.feed(document)
+    tokens: list[Token] = []
+    for token in parser.tokens:
+        if token.kind == "link":
+            tokens.append(Token("link", clean_spaces(token.text), urljoin(base_url, token.href)))
+        else:
+            tokens.append(Token("text", clean_spaces(token.text)))
+    return [token for token in tokens if token.text]
+
+
+def nearby_episode_count(tokens: list[Token], index: int) -> int | None:
+    pattern = re.compile(rf"(?:^|\s)(?:\d(?:\.\d)?\s+)?(\d{{1,4}})\s*(?:{QUALITY_WORDS})?(?:\s|$)", re.I)
+    for token in reversed(tokens[max(0, index - 10) : index]):
+        text = token.text
+        if text in NOISE_TITLES:
+            continue
+        if re.search(r"\b(?:19|20)\d{2}\b", text) and not re.search(QUALITY_WORDS, text, re.I):
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        count = int(match.group(1))
+        if 0 < count < 2000:
+            return count
+    return None
+
+
 def route_accepts_title(route: CatalogRoute, title: str, kind: str) -> bool:
     if route.kind in {"movie", "series"} and kind != route.kind:
         return False
@@ -280,30 +389,55 @@ def route_accepts_title(route: CatalogRoute, title: str, kind: str) -> bool:
     return True
 
 
+def route_accepts_link(route: CatalogRoute, title: str, url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    path = parsed.path.lower()
+    if route.kind == "series":
+        return "/series/" in path or detect_episode_number(title) is not None
+    if route.kind == "movie":
+        return "/movie/" in path or "/movies/" in path or detect_kind(title, "mixed") == "movie"
+    return (
+        "/series/" in path
+        or "/movie/" in path
+        or "/movies/" in path
+        or detect_kind(title, "mixed") in {"movie", "series"}
+    )
+
+
 def extract_media_items(document: str, page_source_url: str, route: CatalogRoute) -> list[MediaItem]:
     items: dict[str, MediaItem] = {}
-    for link in extract_links(document, page_source_url):
-        if should_skip_title(link.text):
+    tokens = extract_tokens(document, page_source_url)
+    for index, token in enumerate(tokens):
+        if token.kind != "link":
             continue
-        kind = detect_kind(link.text, route.kind)
-        if not route_accepts_title(route, link.text, kind):
+        if should_skip_title(token.text):
             continue
-        name = normalize_media_name(link.text, kind)
+        kind = detect_kind(token.text, route.kind)
+        if not route_accepts_title(route, token.text, kind):
+            continue
+        if not route_accepts_link(route, token.text, token.href):
+            continue
+        name = normalize_media_name(token.text, kind)
         if not name or should_skip_title(name):
             continue
-        episode = detect_episode_number(link.text)
+        episode = detect_episode_number(token.text)
+        nearby_count = nearby_episode_count(tokens, index) if kind == "series" else None
         key = f"{kind}:{name.casefold()}"
         item = items.get(key)
         if not item:
-            item = MediaItem(name=name, kind=kind, url=link.href, source=route.provider)
+            item = MediaItem(name=name, kind=kind, url=token.href, source=route.provider)
             items[key] = item
         if episode:
             item.discovered_episodes.add(episode)
-        raw = normalize_display_title(link.text)
+        if nearby_count and (not item.episode_count or nearby_count > item.episode_count):
+            item.episode_count = nearby_count
+        raw = normalize_display_title(token.text)
         if raw not in item.raw_titles:
             item.raw_titles.append(raw)
     for item in items.values():
-        if item.kind == "series" and item.discovered_episodes:
+        if item.kind == "series" and item.discovered_episodes and not item.episode_count:
             item.episode_count = max(item.discovered_episodes)
     return list(items.values())
 
@@ -342,19 +476,28 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
     if not route:
         raise ValueError(f"Unknown catalog id: {catalog_id}")
     pages = max(1, min(int(pages), 25))
-    first_url = route_url(route)
+    first_urls = route_urls(route)
     scraped_items: list[MediaItem] = []
     errors: list[str] = []
     fetched_urls: list[str] = []
     for page in range(1, pages + 1):
-        url = page_url(first_url, page)
-        fetched_urls.append(url)
-        try:
-            document = fetch_html(url)
-        except RuntimeError as exc:
-            errors.append(str(exc))
-            continue
-        scraped_items.extend(extract_media_items(document, url, route))
+        page_errors: list[str] = []
+        page_items: list[MediaItem] = []
+        for first_url in first_urls:
+            url = page_url(first_url, page)
+            fetched_urls.append(url)
+            try:
+                document = fetch_html(url)
+            except RuntimeError as exc:
+                page_errors.append(str(exc))
+                continue
+            page_items = extract_media_items(document, url, route)
+            if page_items:
+                scraped_items.extend(page_items)
+                break
+            page_errors.append(f"No media items found at {url}")
+        else:
+            errors.extend(page_errors)
         time.sleep(0.15)
     items = merge_items(scraped_items)
     if search:
@@ -363,6 +506,8 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
     if fetch_details:
         for item in items:
             if item.kind != "series":
+                continue
+            if item.episode_count:
                 continue
             try:
                 count = count_episodes_from_html(fetch_html(item.url))

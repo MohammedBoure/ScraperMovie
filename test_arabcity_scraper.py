@@ -31,6 +31,18 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(by_name["House of Guinness"].episode_count, 8)
         self.assertEqual(by_name["Big Deal"].kind, "movie")
 
+    def test_extract_modern_series_card_episode_count(self):
+        html = """
+        <div>8.0 23 WEB-DL</div>
+        <a href="/watch">watch</a>
+        <span>favorite</span>
+        <a href="/series/ghost-lawyer">Ghost Lawyer</a>
+        """
+        items = extract_media_items(html, "https://example.test/", CATALOG_ROUTES["akoam-series-all"])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].name, "Ghost Lawyer")
+        self.assertEqual(items[0].episode_count, 23)
+
     def test_count_episodes_from_detail_links(self):
         detail_html = """
         <a href="/e1">مسلسل المؤسس عثمان الحلقة 1 مترجمة</a>

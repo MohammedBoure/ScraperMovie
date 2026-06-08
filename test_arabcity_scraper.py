@@ -397,6 +397,14 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("فشل تشغيل الرابط داخل الصفحة", INDEX_HTML)
         self.assertNotIn("window.open", INDEX_HTML)
 
+    def test_index_hls_has_retry_recovery_and_clear_errors(self):
+        self.assertIn("const HLS_NETWORK_RETRY_LIMIT = 3", INDEX_HTML)
+        self.assertIn("currentHls.startLoad()", INDEX_HTML)
+        self.assertIn("currentHls.recoverMediaError()", INDEX_HTML)
+        self.assertIn("manifestLoadingMaxRetry", INDEX_HTML)
+        self.assertIn("المتصفح لا يدعم تشغيل HLS", INDEX_HTML)
+        self.assertIn("تعذر الاتصال بسيرفر البث", INDEX_HTML)
+
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)
         self.assertEqual(manifest_catalog_ids(), expected)

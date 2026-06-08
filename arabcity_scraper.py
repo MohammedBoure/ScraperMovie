@@ -2120,6 +2120,7 @@ INDEX_HTML = """<!doctype html>
     let visibleItemCount = 0;
     let currentPlayerContext = {};
     const RESULTS_PAGE_SIZE = 40;
+    const HLS_NETWORK_RETRY_LIMIT = 3;
     const episodeMetaCache = new Map();
     const episodeMetaRequests = new Map();
     const playerCheckCache = new Map();
@@ -2577,6 +2578,22 @@ INDEX_HTML = """<!doctype html>
       return new URL(url, window.location.href).pathname.toLowerCase().includes(".m3u8");
     }
 
+    function canPlayNativeHls() {
+      return Boolean(episodeVideo.canPlayType("application/vnd.apple.mpegurl") || episodeVideo.canPlayType("application/x-mpegURL"));
+    }
+
+    function hlsErrorReason(data = {}) {
+      const hlsTypes = window.Hls && window.Hls.ErrorTypes ? window.Hls.ErrorTypes : {};
+      if (data.type === hlsTypes.NETWORK_ERROR) {
+        return "تعذر الاتصال بسيرفر البث أو انقطع تحميل قائمة HLS.";
+      }
+      if (data.type === hlsTypes.MEDIA_ERROR) {
+        return "تعذر فك ترميز البث أو حدث خطأ في مقاطع الفيديو.";
+      }
+      if (data.details) return `خطأ HLS: ${data.details}`;
+      return "تعذر تشغيل رابط HLS داخل المتصفح.";
+    }
+
     function openPlayer(url, title, context = {}) {
       destroyHls();
       playerTitle.textContent = title || "المشغل المباشر";
@@ -2587,16 +2604,53 @@ INDEX_HTML = """<!doctype html>
       episodeVideo.removeAttribute("src");
       episodeVideo.load();
       if (isHlsUrl(url) && window.Hls && window.Hls.isSupported()) {
-        hlsInstance = new window.Hls({ enableWorker: true });
-        hlsInstance.loadSource(url);
-        hlsInstance.attachMedia(episodeVideo);
-        hlsInstance.on(window.Hls.Events.ERROR, (_event, data) => {
-          if (data && data.fatal) {
-            const reason = data.details || data.type || "تعذر تشغيل رابط HLS.";
-            showPlayerState(title, playbackFailureMessage(reason), true, context);
-            setStatus(playbackFailureMessage(reason), true);
-          }
-        });
+        let networkRetryCount = 0;
+        let mediaRecoverAttempted = false;
+        try {
+          hlsInstance = new window.Hls({
+            enableWorker: true,
+            manifestLoadingMaxRetry: 1,
+            levelLoadingMaxRetry: 1,
+            fragLoadingMaxRetry: 1,
+          });
+          const currentHls = hlsInstance;
+          hlsInstance.on(window.Hls.Events.ERROR, (_event, data) => {
+            if (!data || !data.fatal) return;
+            const hlsTypes = window.Hls.ErrorTypes || {};
+            if (data.type === hlsTypes.NETWORK_ERROR && networkRetryCount < HLS_NETWORK_RETRY_LIMIT) {
+              networkRetryCount += 1;
+              const retryText = `إعادة محاولة HLS ${networkRetryCount}/${HLS_NETWORK_RETRY_LIMIT}`;
+              updatePlayerMeta(context, retryText);
+              setStatus(retryText);
+              setTimeout(() => {
+                if (hlsInstance === currentHls) currentHls.startLoad();
+              }, 800 * networkRetryCount);
+              return;
+            }
+            if (data.type === hlsTypes.MEDIA_ERROR && !mediaRecoverAttempted) {
+              mediaRecoverAttempted = true;
+              updatePlayerMeta(context, "محاولة إصلاح خطأ HLS");
+              setStatus("محاولة إصلاح خطأ HLS داخل المشغل...");
+              currentHls.recoverMediaError();
+              return;
+            }
+            const message = playbackFailureMessage(hlsErrorReason(data));
+            showPlayerState(title, message, true, context);
+            setStatus(message, true);
+          });
+          hlsInstance.loadSource(url);
+          hlsInstance.attachMedia(episodeVideo);
+        } catch (error) {
+          const message = playbackFailureMessage(cleanClientText(error && error.message) || "تعذر تهيئة HLS.js لهذا الرابط.");
+          showPlayerState(title, message, true, context);
+          setStatus(message, true);
+          return;
+        }
+      } else if (isHlsUrl(url) && !canPlayNativeHls()) {
+        const message = playbackFailureMessage("المتصفح لا يدعم تشغيل HLS لهذا الرابط، و HLS.js غير متاح أو غير مدعوم.");
+        showPlayerState(title, message, true, context);
+        setStatus(message, true);
+        return;
       } else {
         episodeVideo.src = url;
         episodeVideo.load();

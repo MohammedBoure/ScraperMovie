@@ -703,10 +703,22 @@ def stremio_url(resource: str, item_type: str, item_id: str) -> str:
     return f"{ARABCITY_ADDON_BASE_URL}/{resource}/{item_type}/{encoded_id}.json"
 
 
+def stremio_catalog_url(item_type: str, catalog_id: str, extra: str = "") -> str:
+    if extra:
+        return f"{ARABCITY_ADDON_BASE_URL}/catalog/{item_type}/{catalog_id}/{quote(extra, safe='=&')}.json"
+    return f"{ARABCITY_ADDON_BASE_URL}/catalog/{item_type}/{catalog_id}.json"
+
+
 def source_slug_from_url(url: str) -> str:
     parsed = urlparse(url)
     tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
     return tail or "item"
+
+
+def media_url_from_addon_id(item_id: str) -> str:
+    if ":" not in item_id:
+        return ""
+    return unquote(item_id.rsplit(":", 1)[-1])
 
 
 def build_addon_item_id(media_url: str, kind: str = "series", source: str = "akwam", name: str = "") -> str:
@@ -776,6 +788,63 @@ def player_from_addon_stream(stream_id: str, item_type: str = "ArabCity-Akwam") 
         title = clean_spaces(str(stream.get("title") or stream.get("name") or "ArabCity stream"))
         players.append(PlayerLink(url=stream_url, kind="video" if is_video_url(stream_url) else "iframe", title=title))
     return players
+
+
+def media_item_from_addon_meta(meta: dict[str, object], route: CatalogRoute) -> MediaItem | None:
+    item_id = str(meta.get("id") or "")
+    url = media_url_from_addon_id(item_id)
+    if not url:
+        return None
+    name = clean_spaces(str(meta.get("name") or ""))
+    if not name:
+        return None
+    kind = "series" if ":series:" in item_id else "movie" if ":movie:" in item_id else detect_kind(name, route.kind)
+    item = MediaItem(
+        name=name,
+        kind=kind,
+        url=url,
+        source=route.provider,
+        image=str(meta.get("poster") or meta.get("background") or ""),
+        raw_titles=[name],
+    )
+    description = clean_spaces(str(meta.get("description") or ""))
+    if description and description not in item.raw_titles:
+        item.raw_titles.append(description)
+    return item
+
+
+def addon_catalog_items(catalog_id: str, route: CatalogRoute, pages: int, search: str = "") -> tuple[list[MediaItem], list[str], list[str]]:
+    items: list[MediaItem] = []
+    errors: list[str] = []
+    fetched_urls: list[str] = []
+    item_type = addon_type_for_source(route.provider)
+    page_size = 100
+    for page in range(1, pages + 1):
+        extras: list[str] = []
+        if search:
+            extras.append(f"search={search}")
+        if page > 1:
+            extras.append(f"skip={(page - 1) * page_size}")
+        url = stremio_catalog_url(item_type, catalog_id, "&".join(extras))
+        fetched_urls.append(url)
+        try:
+            payload = fetch_json(url)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        metas = payload.get("metas")
+        if not isinstance(metas, list):
+            errors.append(f"Invalid catalog payload at {url}")
+            continue
+        for meta in metas:
+            if not isinstance(meta, dict):
+                continue
+            item = media_item_from_addon_meta(meta, route)
+            if item:
+                items.append(item)
+        if not metas:
+            errors.append(f"ArabCity addon returned 0 items at {url}")
+    return items, errors, fetched_urls
 
 
 def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
@@ -849,10 +918,11 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
         raise ValueError(f"Unknown catalog id: {catalog_id}")
     pages = max(1, min(int(pages), 25))
     first_urls = route_urls(route)
-    scraped_items: list[MediaItem] = []
-    errors: list[str] = []
-    fetched_urls: list[str] = []
+    scraped_items, errors, fetched_urls = addon_catalog_items(catalog_id, route, pages, search=search)
+    used_addon_catalog = bool(scraped_items)
     for page in range(1, pages + 1):
+        if used_addon_catalog:
+            break
         page_errors: list[str] = []
         page_items: list[MediaItem] = []
         for first_url in first_urls:
@@ -872,7 +942,7 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
             errors.extend(page_errors)
         time.sleep(0.15)
     items = merge_items(scraped_items)
-    if search:
+    if search and not used_addon_catalog:
         needle = search.casefold()
         items = [item for item in items if needle in item.name.casefold() or any(needle in title.casefold() for title in item.raw_titles)]
     if fetch_details:

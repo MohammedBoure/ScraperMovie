@@ -8,6 +8,7 @@ from arabcity_scraper import (
     extract_media_items,
     extract_player_links,
     is_allowed_source_url,
+    media_item_from_addon_meta,
     normalize_media_name,
     request_safe_url,
     stremio_url,
@@ -105,6 +106,19 @@ class ArabCityScraperTests(unittest.TestCase):
         )
         self.assertIn("arabcity%3Aakoam%3Aseries%3A", url)
         self.assertIn("https%253A%252F%252Fakwam.it", url)
+
+    def test_media_item_from_addon_meta_uses_embedded_source_url(self):
+        meta = {
+            "id": "arabcity:akoam:series:from-4:https%3A%2F%2Fakwam.it%2Fseries%2F5597%2Ffrom-4",
+            "name": "From 4",
+            "poster": "https://img.example.test/poster.jpg",
+            "description": "جودة: WEB-DL",
+        }
+        item = media_item_from_addon_meta(meta, CATALOG_ROUTES["akoam-series-all"])
+        self.assertIsNotNone(item)
+        self.assertEqual(item.url, "https://akwam.it/series/5597/from-4")
+        self.assertEqual(item.kind, "series")
+        self.assertEqual(item.image, "https://img.example.test/poster.jpg")
 
 
 if __name__ == "__main__":

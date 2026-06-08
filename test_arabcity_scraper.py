@@ -326,10 +326,17 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(catalogs[0]["id"], COMPLETE_LIBRARY_CATALOG_ID)
 
     def test_index_autoloads_first_ten_series_episode_lists(self):
-        self.assertIn("autoloadInitialEpisodeLists(items, batch)", INDEX_HTML)
+        self.assertIn("autoloadInitialEpisodeLists(visibleItems, batch)", INDEX_HTML)
         self.assertIn('items.filter(item => item.kind === "series").slice(0, 10)', INDEX_HTML)
         self.assertIn('button.dataset.autoloaded = "1"', INDEX_HTML)
         self.assertIn("episodeMetaRequests", INDEX_HTML)
+
+    def test_index_progressively_renders_results_in_memory(self):
+        self.assertIn("const RESULTS_PAGE_SIZE = 40", INDEX_HTML)
+        self.assertIn("let extractedItems = []", INDEX_HTML)
+        self.assertIn("extractedItems.slice(0, visibleItemCount)", INDEX_HTML)
+        self.assertIn('id="loadMore"', INDEX_HTML)
+        self.assertIn("عرض المزيد", INDEX_HTML)
 
     def test_index_blocks_unverified_episode_watch_buttons(self):
         self.assertIn("isDirectVideoUrl", INDEX_HTML)

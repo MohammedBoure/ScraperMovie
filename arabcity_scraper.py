@@ -1726,12 +1726,32 @@ INDEX_HTML = """<!doctype html>
       gap: 18px;
       align-items: start;
     }
+    .results-column { min-width: 0; }
     .media-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
       gap: 16px;
       align-items: start;
     }
+    .load-more {
+      width: 100%;
+      min-height: 48px;
+      margin-top: 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: rgba(255,255,255,.055);
+      color: var(--ink);
+      font-weight: 900;
+      cursor: pointer;
+      transition: transform .2s ease, border-color .2s ease, background .2s ease;
+    }
+    .load-more:hover { transform: translateY(-2px); border-color: rgba(22,184,166,.5); background: rgba(22,184,166,.1); }
+    .load-more[hidden] { display: none; }
+    .load-more small { color: var(--muted); font-size: .78rem; font-weight: 800; }
     .media-card {
       position: relative;
       overflow: hidden;
@@ -1981,7 +2001,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div id="statsGrid" class="stats-grid" aria-live="polite"></div>
       <div class="watch-layout">
-        <div id="rows" class="media-grid"></div>
+        <div class="results-column">
+          <div id="rows" class="media-grid"></div>
+          <button id="loadMore" class="load-more" type="button" hidden><i data-lucide="chevrons-down"></i><span>عرض المزيد</span></button>
+        </div>
         <section id="playerPanel" class="player-panel" aria-live="polite">
           <div class="player-bar">
             <div id="playerTitle" class="player-title">المشغل المباشر</div>
@@ -2003,6 +2026,7 @@ INDEX_HTML = """<!doctype html>
   <script>
     const catalog = document.querySelector("#catalog");
     const rows = document.querySelector("#rows");
+    const loadMoreButton = document.querySelector("#loadMore");
     const statsGrid = document.querySelector("#statsGrid");
     const statusBox = document.querySelector("#status");
     const playerPanel = document.querySelector("#playerPanel");
@@ -2014,6 +2038,9 @@ INDEX_HTML = """<!doctype html>
     let hlsInstance = null;
     let searchTimer = null;
     let renderBatch = 0;
+    let extractedItems = [];
+    let visibleItemCount = 0;
+    const RESULTS_PAGE_SIZE = 40;
     const episodeMetaCache = new Map();
     const episodeMetaRequests = new Map();
 
@@ -2039,6 +2066,9 @@ INDEX_HTML = """<!doctype html>
 
     function renderLoadingCards(count = 12) {
       renderStats();
+      extractedItems = [];
+      visibleItemCount = 0;
+      loadMoreButton.hidden = true;
       rows.innerHTML = Array.from({ length: count }, () => `
         <div class="skeleton-card">
           <div class="skeleton-poster"></div>
@@ -2109,15 +2139,32 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderItems(items) {
+      extractedItems = Array.isArray(items) ? items : [];
+      visibleItemCount = Math.min(RESULTS_PAGE_SIZE, extractedItems.length);
+      renderVisibleItems();
+    }
+
+    function updateLoadMoreButton() {
+      const remaining = Math.max(0, extractedItems.length - visibleItemCount);
+      loadMoreButton.hidden = remaining <= 0;
+      if (remaining > 0) {
+        const nextCount = Math.min(RESULTS_PAGE_SIZE, remaining);
+        loadMoreButton.innerHTML = `<i data-lucide="chevrons-down"></i><span>عرض المزيد</span><small>${nextCount} من ${remaining}</small>`;
+      }
+    }
+
+    function renderVisibleItems() {
       renderBatch += 1;
       const batch = renderBatch;
       rows.innerHTML = "";
-      if (!items.length) {
+      if (!extractedItems.length) {
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="search-x"></i><h3>لا توجد نتائج</h3><p>جرّب كتالوجا آخر أو غيّر عبارة البحث.</p></div></div>`;
+        loadMoreButton.hidden = true;
         refreshIcons();
         return;
       }
-      for (const item of items) {
+      const visibleItems = extractedItems.slice(0, visibleItemCount);
+      for (const item of visibleItems) {
         const card = document.createElement("article");
         card.className = "media-card";
         const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : `<div class="raw">&nbsp;</div>`;
@@ -2142,9 +2189,10 @@ INDEX_HTML = """<!doctype html>
         `;
         rows.appendChild(card);
       }
+      updateLoadMoreButton();
       refreshIcons();
-      prefetchSeriesEpisodeMeta(items, batch);
-      autoloadInitialEpisodeLists(items, batch);
+      prefetchSeriesEpisodeMeta(visibleItems, batch);
+      autoloadInitialEpisodeLists(visibleItems, batch);
     }
 
     function episodeCountLabel(item) {
@@ -2379,6 +2427,10 @@ INDEX_HTML = """<!doctype html>
     document.querySelector("#search").addEventListener("input", () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => loadItems(), 420);
+    });
+    loadMoreButton.addEventListener("click", () => {
+      visibleItemCount = Math.min(extractedItems.length, visibleItemCount + RESULTS_PAGE_SIZE);
+      renderVisibleItems();
     });
 
     rows.addEventListener("click", async (event) => {

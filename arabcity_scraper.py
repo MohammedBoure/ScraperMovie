@@ -49,13 +49,25 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
+def env_float(name: str, default: float, minimum: float = 0.0, maximum: float | None = None) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    value = max(minimum, value)
+    return min(value, maximum) if maximum is not None else value
+
+
+WORKER_HARD_CAP = 8
+DEFAULT_WORKERS = 6
+SOURCE_SUBMIT_DELAY = 0.03
 EPISODE_CACHE_LIMIT = env_int("ARABCITY_EPISODE_CACHE_SIZE", 128)
 CATALOG_CACHE_LIMIT = env_int("ARABCITY_CATALOG_CACHE_SIZE", 32)
 EPISODE_META_CACHE: OrderedDict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_META_CACHE_LOCK = Lock()
 EPISODE_LINKS_CACHE: OrderedDict[str, tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_LINKS_CACHE_LOCK = Lock()
-CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool, str], dict[str, object]] = OrderedDict()
+CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool, str, int], dict[str, object]] = OrderedDict()
 CATALOG_CACHE_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 ARABIC_SEARCH_TRANSLATION = str.maketrans(
@@ -173,6 +185,33 @@ def catalog_matches_source_filter(catalog_id: str, source_filter: str = "all") -
         return True
     route = CATALOG_ROUTES.get(catalog_id)
     return bool(route and route.provider == source_filter)
+
+
+def worker_request_value(value: object | None = None, env_name: str = "ARABCITY_GROUP_WORKERS") -> int:
+    raw_value = os.environ.get(env_name, str(DEFAULT_WORKERS)) if value in {None, ""} else value
+    try:
+        return int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_WORKERS
+
+
+def bounded_worker_count(value: object | None = None, env_name: str = "ARABCITY_GROUP_WORKERS") -> int:
+    requested = worker_request_value(value, env_name=env_name)
+    return max(1, min(requested, WORKER_HARD_CAP))
+
+
+def source_submit_delay() -> float:
+    return env_float("ARABCITY_SOURCE_SUBMIT_DELAY", SOURCE_SUBMIT_DELAY, minimum=0.0, maximum=0.5)
+
+
+def performance_info(worker_count: int, requested_workers: int, task_count: int = 0) -> dict[str, object]:
+    return {
+        "workers": worker_count,
+        "requested_workers": requested_workers,
+        "worker_cap": WORKER_HARD_CAP,
+        "source_delay_ms": int(source_submit_delay() * 1000),
+        "tasks": task_count,
+    }
 
 
 NOISE_TITLES = {
@@ -1136,17 +1175,18 @@ def mark_playability(item: MediaItem) -> MediaItem:
     return item
 
 
-def filter_playable_items(items: list[MediaItem]) -> list[MediaItem]:
+def filter_playable_items(items: list[MediaItem], workers: object | None = None) -> list[MediaItem]:
     if not items:
         return []
-    try:
-        requested_workers = int(os.environ.get("ARABCITY_PLAYABLE_WORKERS", "10"))
-    except ValueError:
-        requested_workers = 10
-    workers = max(1, min(len(items), requested_workers))
+    worker_count = min(len(items), bounded_worker_count(workers, env_name="ARABCITY_PLAYABLE_WORKERS"))
+    submit_delay = source_submit_delay()
     checked: list[MediaItem] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(mark_playability, item) for item in items]
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = []
+        for index, item in enumerate(items):
+            if index and submit_delay and index % worker_count == 0:
+                time.sleep(submit_delay)
+            futures.append(executor.submit(mark_playability, item))
         for future in as_completed(futures):
             checked.append(future.result())
     return [item for item in checked if item.playable]
@@ -1343,7 +1383,8 @@ def catalog_cache_key(
     fetch_details: bool = False,
     playable_only: bool = False,
     source_filter: str = "all",
-) -> tuple[str, int, str, bool, bool, str]:
+    workers: object | None = None,
+) -> tuple[str, int, str, bool, bool, str, int]:
     return (
         catalog_id,
         max(1, min(int(pages), 25)),
@@ -1351,6 +1392,7 @@ def catalog_cache_key(
         bool(fetch_details),
         bool(playable_only),
         normalize_source_filter(source_filter),
+        bounded_worker_count(workers),
     )
 
 
@@ -1365,7 +1407,7 @@ def clear_catalog_cache() -> None:
         CATALOG_CACHE.clear()
 
 
-def cached_catalog_result(key: tuple[str, int, str, bool, bool, str]) -> dict[str, object] | None:
+def cached_catalog_result(key: tuple[str, int, str, bool, bool, str, int]) -> dict[str, object] | None:
     with CATALOG_CACHE_LOCK:
         cached = CATALOG_CACHE.get(key)
         if cached is not None:
@@ -1377,7 +1419,7 @@ def cached_catalog_result(key: tuple[str, int, str, bool, bool, str]) -> dict[st
     return result
 
 
-def store_catalog_result(key: tuple[str, int, str, bool, bool, str], result: dict[str, object]) -> dict[str, object]:
+def store_catalog_result(key: tuple[str, int, str, bool, bool, str, int], result: dict[str, object]) -> dict[str, object]:
     stored = deepcopy(result)
     stored["cached"] = False
     with CATALOG_CACHE_LOCK:
@@ -1394,6 +1436,7 @@ def scrape_catalog_group(
     fetch_details: bool = False,
     playable_only: bool = False,
     source_filter: str = "all",
+    workers: object | None = None,
 ) -> dict[str, object]:
     child_catalogs = CATALOG_GROUPS.get(catalog_id)
     if not child_catalogs:
@@ -1405,6 +1448,8 @@ def scrape_catalog_group(
     fetched_urls: list[str] = []
     items: list[MediaItem] = []
     if not child_catalogs:
+        requested_workers = worker_request_value(workers)
+        worker_count = bounded_worker_count(workers)
         return {
             "catalog": catalog_id,
             "catalog_name": "المكتبة الكاملة",
@@ -1413,27 +1458,29 @@ def scrape_catalog_group(
             "urls": [],
             "count": 0,
             "playable_only": playable_only,
+            "performance": performance_info(worker_count, requested_workers),
             "stats": media_stats([]),
             "errors": [],
             "items": [],
         }
-    try:
-        requested_workers = int(os.environ.get("ARABCITY_GROUP_WORKERS", "8"))
-    except ValueError:
-        requested_workers = 8
-    workers = max(1, min(len(child_catalogs), requested_workers))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(
-                scrape_single_catalog,
-                child_id,
-                pages=pages,
-                search=search,
-                fetch_details=fetch_details,
-                fallback_to_site=False,
-            ): child_id
-            for child_id in child_catalogs
-        }
+    requested_workers = worker_request_value(workers)
+    worker_count = min(len(child_catalogs), bounded_worker_count(workers))
+    submit_delay = source_submit_delay()
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {}
+        for index, child_id in enumerate(child_catalogs):
+            if index and submit_delay:
+                time.sleep(submit_delay)
+            futures[
+                executor.submit(
+                    scrape_single_catalog,
+                    child_id,
+                    pages=pages,
+                    search=search,
+                    fetch_details=fetch_details,
+                    fallback_to_site=False,
+                )
+            ] = child_id
         for future in as_completed(futures):
             child_id = futures[future]
             try:
@@ -1448,7 +1495,7 @@ def scrape_catalog_group(
                 items.extend(media_item_from_payload(item) for item in payload_items if isinstance(item, dict))
     merged_items = merge_items(item for item in items if item.name and item.url)
     if playable_only:
-        merged_items = filter_playable_items(merged_items)
+        merged_items = filter_playable_items(merged_items, workers=workers)
     merged_items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
     return {
         "catalog": catalog_id,
@@ -1458,6 +1505,7 @@ def scrape_catalog_group(
         "urls": fetched_urls,
         "count": len(merged_items),
         "playable_only": playable_only,
+        "performance": performance_info(worker_count, requested_workers, task_count=len(child_catalogs)),
         "stats": media_stats(merged_items),
         "errors": errors,
         "items": [item.to_dict() for item in merged_items],
@@ -1542,6 +1590,7 @@ def scrape_catalog(
     fetch_details: bool = False,
     playable_only: bool = False,
     source_filter: str = "all",
+    workers: object | None = None,
 ) -> dict[str, object]:
     key = catalog_cache_key(
         catalog_id,
@@ -1550,12 +1599,13 @@ def scrape_catalog(
         fetch_details=fetch_details,
         playable_only=playable_only,
         source_filter=source_filter,
+        workers=workers,
     )
     cached = cached_catalog_result(key)
     if cached is not None:
         return cached
 
-    catalog_id, pages, search, fetch_details, playable_only, source_filter = key
+    catalog_id, pages, search, fetch_details, playable_only, source_filter, worker_count = key
     if catalog_id in CATALOG_GROUPS:
         result = scrape_catalog_group(
             catalog_id,
@@ -1564,6 +1614,7 @@ def scrape_catalog(
             fetch_details=fetch_details,
             playable_only=playable_only,
             source_filter=source_filter,
+            workers=workers,
         )
     else:
         route = CATALOG_ROUTES.get(catalog_id)
@@ -1576,6 +1627,7 @@ def scrape_catalog(
                 "urls": [],
                 "count": 0,
                 "playable_only": playable_only,
+                "performance": performance_info(worker_count, worker_count),
                 "stats": media_stats([]),
                 "errors": [],
                 "items": [],
@@ -1589,6 +1641,7 @@ def scrape_catalog(
                 playable_only=playable_only,
             )
             result["source_filter"] = source_filter
+            result["performance"] = performance_info(worker_count, worker_request_value(workers), task_count=1)
     return store_catalog_result(key, result)
 
 
@@ -1737,7 +1790,7 @@ INDEX_HTML = """<!doctype html>
     .hero p { margin: 14px 0 0; max-width: 720px; color: var(--muted); font-size: 1rem; line-height: 1.8; }
     .control-panel {
       display: grid;
-      grid-template-columns: 1fr 120px;
+      grid-template-columns: minmax(0,1fr) 118px 118px;
       gap: 12px;
       align-items: end;
       align-self: center;
@@ -2141,6 +2194,9 @@ INDEX_HTML = """<!doctype html>
           <label>عدد الصفحات
             <input id="pages" type="number" min="1" max="25" value="1">
           </label>
+          <label>التوازي
+            <input id="workers" type="number" min="1" max="8" value="6">
+          </label>
           <label class="toggle">
             <input id="details" type="checkbox">
             تفاصيل أعمق
@@ -2298,6 +2354,7 @@ INDEX_HTML = """<!doctype html>
         catalog: catalog.value,
         source_filter: document.querySelector("#sourceFilter").value || "all",
         pages: document.querySelector("#pages").value || "1",
+        workers: document.querySelector("#workers").value || "6",
         search: document.querySelector("#search").value || "",
         details: document.querySelector("#details").checked ? "1" : "0",
         playable_only: playableOnly ? "1" : "0",
@@ -2312,7 +2369,8 @@ INDEX_HTML = """<!doctype html>
         const stats = data.stats || {};
         const detail = `(${stats.movies || 0} فيلم، ${stats.series || 0} مسلسل)`;
         const prefix = data.playable_only ? "جاهز للتشغيل فقط" : "المكتبة جاهزة";
-        setStatus(`${prefix}: ${data.count} نتيجة ${detail} من ${data.catalog_name}${suffix}.`);
+        const performance = data.performance && data.performance.workers ? `، توازي ${data.performance.workers}` : "";
+        setStatus(`${prefix}: ${data.count} نتيجة ${detail} من ${data.catalog_name}${performance}${suffix}.`);
       } catch (error) {
         if (error.name === "AbortError") return;
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;
@@ -2832,6 +2890,7 @@ INDEX_HTML = """<!doctype html>
       loadItems();
     });
     document.querySelector("#pages").addEventListener("change", () => loadItems());
+    document.querySelector("#workers").addEventListener("change", () => loadItems());
     document.querySelector("#sourceFilter").addEventListener("change", () => loadItems());
     document.querySelector("#details").addEventListener("change", () => loadItems());
     document.querySelector("#playableOnly").addEventListener("change", () => loadItems());
@@ -2944,6 +3003,7 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
             playable_only = params.get("playable_only", ["0"])[0] in {"1", "true", "yes"}
             source_filter = params.get("source_filter", ["all"])[0]
+            workers = params.get("workers", [""])[0]
             try:
                 self.send_json(
                     scrape_catalog(
@@ -2953,6 +3013,7 @@ class ArabCityHandler(BaseHTTPRequestHandler):
                         fetch_details=details,
                         playable_only=playable_only,
                         source_filter=source_filter,
+                        workers=workers,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
@@ -3058,6 +3119,7 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_parser.add_argument("--search", default="")
     scrape_parser.add_argument("--details", action="store_true", help="Fetch detail pages to improve episode counts.")
     scrape_parser.add_argument("--playable-only", action="store_true", help="Only keep items with a verified direct video stream.")
+    scrape_parser.add_argument("--workers", type=int, default=None, help="Limit parallel catalog and stream checks.")
     scrape_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
 
     episodes_parser = subparsers.add_parser("episodes", help="Extract episode watch links from a media page.")
@@ -3096,6 +3158,7 @@ def main(argv: list[str] | None = None) -> int:
         search=args.search,
         fetch_details=args.details,
         playable_only=args.playable_only,
+        workers=args.workers,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

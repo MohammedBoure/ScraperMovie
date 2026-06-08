@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 import unittest
 from unittest.mock import patch
 
@@ -445,6 +446,12 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn('value="alooytv"', INDEX_HTML)
         self.assertIn("source_filter:", INDEX_HTML)
 
+    def test_index_includes_safe_worker_control(self):
+        self.assertIn('id="workers"', INDEX_HTML)
+        self.assertIn('max="8"', INDEX_HTML)
+        self.assertIn("workers:", INDEX_HTML)
+        self.assertIn("data.performance.workers", INDEX_HTML)
+
     def test_index_uses_check_player_badges(self):
         self.assertIn("/api/check-player", INDEX_HTML)
         self.assertIn("playerCheckCache", INDEX_HTML)
@@ -688,6 +695,60 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertTrue(all(CATALOG_ROUTES[catalog_id].provider == "alooytv" for catalog_id in called))
         self.assertEqual(result["source_filter"], "alooytv")
         self.assertEqual({item["source"] for item in result["items"]}, {"alooytv"})
+
+    def test_complete_library_clamps_worker_count_and_paces_submissions(self):
+        seen_workers: list[int] = []
+
+        class RecordingExecutor:
+            def __init__(self, max_workers):
+                seen_workers.append(max_workers)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def submit(self, fn, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except Exception as exc:  # noqa: BLE001 - preserve executor behavior in the fake.
+                    future.set_exception(exc)
+                return future
+
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            return {"urls": [f"https://example.test/{catalog_id}"], "errors": [], "items": []}
+
+        with patch("arabcity_scraper.ThreadPoolExecutor", RecordingExecutor):
+            with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single):
+                with patch("arabcity_scraper.source_submit_delay", return_value=0.01):
+                    with patch("arabcity_scraper.time.sleep") as mocked_sleep:
+                        result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, workers=99)
+
+        self.assertEqual(seen_workers, [8])
+        self.assertEqual(result["performance"]["workers"], 8)
+        self.assertEqual(result["performance"]["requested_workers"], 99)
+        self.assertEqual(result["performance"]["worker_cap"], 8)
+        self.assertEqual(mocked_sleep.call_count, len(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID]) - 1)
+        self.assertTrue(all(call.args == (0.01,) for call in mocked_sleep.call_args_list))
+
+    def test_scrape_catalog_cache_separates_worker_count(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            return {"urls": [f"https://example.test/{catalog_id}"], "errors": [], "items": []}
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
+            with patch("arabcity_scraper.time.sleep"):
+                first = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, workers=2)
+                second = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, workers=4)
+                first_again = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, workers=2)
+
+        self.assertEqual(mocked.call_count, len(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID]) * 2)
+        self.assertFalse(first["cached"])
+        self.assertFalse(second["cached"])
+        self.assertTrue(first_again["cached"])
+        self.assertEqual(first["performance"]["workers"], 2)
+        self.assertEqual(second["performance"]["workers"], 4)
 
     def test_complete_library_playable_only_filters_after_merge(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):

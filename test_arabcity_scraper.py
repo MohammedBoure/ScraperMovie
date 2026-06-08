@@ -5,6 +5,7 @@ from arabcity_scraper import (
     COMPLETE_LIBRARY_CATALOG_ID,
     CATALOG_GROUPS,
     CATALOG_ROUTES,
+    INDEX_HTML,
     MANIFEST,
     EpisodeLink,
     MediaItem,
@@ -215,6 +216,12 @@ class ArabCityScraperTests(unittest.TestCase):
     def test_available_catalogs_starts_with_complete_library(self):
         catalogs = available_catalogs()
         self.assertEqual(catalogs[0]["id"], COMPLETE_LIBRARY_CATALOG_ID)
+
+    def test_index_autoloads_first_ten_series_episode_lists(self):
+        self.assertIn("autoloadInitialEpisodeLists(items, batch)", INDEX_HTML)
+        self.assertIn('items.filter(item => item.kind === "series").slice(0, 10)', INDEX_HTML)
+        self.assertIn('button.dataset.autoloaded = "1"', INDEX_HTML)
+        self.assertIn("episodeMetaRequests", INDEX_HTML)
 
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)

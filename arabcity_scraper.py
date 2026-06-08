@@ -1790,6 +1790,7 @@ INDEX_HTML = """<!doctype html>
     let searchTimer = null;
     let renderBatch = 0;
     const episodeMetaCache = new Map();
+    const episodeMetaRequests = new Map();
 
     function refreshIcons() {
       if (window.lucide) window.lucide.createIcons();
@@ -1909,6 +1910,7 @@ INDEX_HTML = """<!doctype html>
       }
       refreshIcons();
       prefetchSeriesEpisodeMeta(items, batch);
+      autoloadInitialEpisodeLists(items, batch);
     }
 
     function episodeCountLabel(item) {
@@ -1977,14 +1979,58 @@ INDEX_HTML = """<!doctype html>
       const key = episodeMetaKey(item.url, item.source, item.name);
       let data = episodeMetaCache.get(key);
       if (!data) {
-        const params = new URLSearchParams({ url: item.url, source: item.source || "akwam", name: item.name || "" });
-        const response = await fetch(`/api/episode-meta?${params}`);
-        data = await response.json();
-        if (!response.ok) throw new Error(data.error || "تعذر فحص الحلقات");
-        episodeMetaCache.set(key, data);
+        let request = episodeMetaRequests.get(key);
+        if (!request) {
+          request = (async () => {
+            const params = new URLSearchParams({ url: item.url, source: item.source || "akwam", name: item.name || "" });
+            const response = await fetch(`/api/episode-meta?${params}`);
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || "تعذر فحص الحلقات");
+            episodeMetaCache.set(key, payload);
+            return payload;
+          })().finally(() => episodeMetaRequests.delete(key));
+          episodeMetaRequests.set(key, request);
+        }
+        data = await request;
       }
       applyEpisodeMeta(item, data, batch);
       return data;
+    }
+
+    function applyAutoloadedEpisodeList(item, data, batch) {
+      if (batch !== renderBatch) return;
+      const button = findEpisodeElement(".episodes-button", item);
+      if (!button) return;
+      const list = button.closest(".actions").querySelector(".episode-list");
+      if (!list) return;
+      list.innerHTML = episodeLinksMarkup(data.episodes || []);
+      list.hidden = true;
+      button.dataset.loaded = "1";
+      button.dataset.autoloaded = "1";
+      button.dataset.episodeChecked = "1";
+      button.dataset.episodeCount = String(data.count || 0);
+      if (data.count > 0) {
+        button.innerHTML = `<i data-lucide="list-video"></i><span>الحلقات (${data.count})</span>`;
+      }
+      refreshIcons();
+    }
+
+    async function autoloadInitialEpisodeLists(items, batch) {
+      const seriesItems = items.filter(item => item.kind === "series").slice(0, 10);
+      let index = 0;
+      const workerCount = Math.min(3, seriesItems.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (index < seriesItems.length && batch === renderBatch) {
+          const item = seriesItems[index++];
+          try {
+            const data = await fetchEpisodeMeta(item, batch);
+            applyAutoloadedEpisodeList(item, data, batch);
+          } catch (_error) {
+            applyAutoloadedEpisodeList(item, { count: 0, episodes: [], errors: ["تعذر تحميل الحلقات"] }, batch);
+          }
+        }
+      });
+      await Promise.all(workers);
     }
 
     async function prefetchSeriesEpisodeMeta(items, batch) {

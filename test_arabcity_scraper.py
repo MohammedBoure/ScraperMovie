@@ -453,12 +453,21 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("data.performance.workers", INDEX_HTML)
 
     def test_index_shows_detailed_complete_library_progress(self):
+        self.assertIn('id="scrapeProgress"', INDEX_HTML)
+        self.assertIn('id="scrapeProgressFill"', INDEX_HTML)
         self.assertIn("/api/scrape/start", INDEX_HTML)
         self.assertIn("/api/scrape/progress", INDEX_HTML)
         self.assertIn("renderScrapeProgress", INDEX_HTML)
+        self.assertIn("updateScrapeProgressBar", INDEX_HTML)
         self.assertIn("completed_catalogs", INDEX_HTML)
         self.assertIn("current_results", INDEX_HTML)
         self.assertIn("اكتمل ${completed}/${total} كتالوجات", INDEX_HTML)
+
+    def test_index_has_production_layout_guards(self):
+        self.assertIn("max-width: min(820px, 100%)", INDEX_HTML)
+        self.assertIn(".episode-link span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }", INDEX_HTML)
+        self.assertIn("scrollbar-gutter: stable", INDEX_HTML)
+        self.assertIn("hideScrapeProgress();", INDEX_HTML)
 
     def test_index_uses_check_player_badges(self):
         self.assertIn("/api/check-player", INDEX_HTML)

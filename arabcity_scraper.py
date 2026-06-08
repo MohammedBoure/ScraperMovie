@@ -2025,6 +2025,12 @@ INDEX_HTML = """<!doctype html>
       transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease, background .22s ease;
     }
     .primary-button:hover, .episodes-button:hover, .watch-now:hover { transform: translateY(-2px); box-shadow: 0 16px 32px rgba(22,184,166,.22); }
+    .primary-button span, .episodes-button span, .watch-now span, .player-controls button span, .load-more span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .results-section { min-height: 520px; }
     .status-row {
       display: flex;
@@ -2050,19 +2056,50 @@ INDEX_HTML = """<!doctype html>
       box-shadow: 0 0 18px var(--glow);
     }
     .status {
+      flex: 1 1 auto;
+      max-width: min(820px, 100%);
+      min-width: 0;
       min-height: 36px;
       display: inline-flex;
       align-items: center;
-      justify-content: flex-end;
-      padding: 0 12px;
+      justify-content: flex-start;
+      padding: 8px 12px;
       border: 1px solid var(--line);
-      border-radius: 999px;
+      border-radius: 8px;
       background: rgba(255,255,255,.035);
       color: var(--muted);
       font-size: .9rem;
-      text-align: left;
+      line-height: 1.55;
+      text-align: right;
+      overflow-wrap: anywhere;
     }
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
+    .scrape-progress {
+      margin: -10px 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.035);
+      overflow: hidden;
+    }
+    .scrape-progress[hidden] { display: none; }
+    .scrape-progress-track { height: 8px; background: rgba(255,255,255,.055); }
+    .scrape-progress-fill {
+      width: 0%;
+      height: 100%;
+      background: var(--accent);
+      transition: width .28s ease;
+    }
+    .scrape-progress-meta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px 14px;
+      padding: 9px 11px;
+      color: var(--muted);
+      font-size: .8rem;
+      font-weight: 800;
+    }
+    .scrape-progress-meta span { min-width: 0; overflow-wrap: anywhere; }
     .result-tabs {
       display: flex;
       flex-wrap: wrap;
@@ -2190,11 +2227,13 @@ INDEX_HTML = """<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 8px;
       color: var(--faint);
       font-size: .78rem;
     }
     .pill { display: inline-flex; align-items: center; gap: 5px; color: #a7f3d0; font-weight: 800; }
+    .episode-count { white-space: nowrap; }
     .actions { display: grid; gap: 8px; margin-top: 2px; }
     .episodes-button {
       width: 100%;
@@ -2220,12 +2259,13 @@ INDEX_HTML = """<!doctype html>
     .direct-chip.is-direct { color: #99f6e4; border-color: rgba(22,184,166,.28); background: rgba(22,184,166,.08); }
     .direct-chip.is-uncertain { color: #fde68a; border-color: rgba(246,178,60,.34); background: rgba(246,178,60,.09); }
     .direct-chip.is-unavailable { color: #fecdd3; border-color: rgba(251,113,133,.34); background: rgba(251,113,133,.09); }
-    .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; padding-top: 2px; }
+    .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-top: 2px; }
     .episode-link {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
+      min-width: 0;
       min-height: 36px;
       padding: 0 10px;
       border: 1px solid var(--line);
@@ -2236,6 +2276,7 @@ INDEX_HTML = """<!doctype html>
       font-weight: 700;
     }
     .episode-link:hover { border-color: rgba(22,184,166,.42); color: #99f6e4; }
+    .episode-link span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .episode-link small { color: var(--faint); font-size: .72rem; font-weight: 800; }
     .episode-link.is-direct small { color: #99f6e4; }
     .inline-error { color: #fecdd3; font-size: .82rem; line-height: 1.6; }
@@ -2324,7 +2365,7 @@ INDEX_HTML = """<!doctype html>
       .hero::after { height: 230px; }
       .control-panel { grid-template-columns: 1fr; }
       .status-row { align-items: stretch; flex-direction: column; }
-      .status { justify-content: center; text-align: center; }
+      .status { justify-content: center; text-align: center; max-width: 100%; }
       .stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .media-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
       .card-info { padding: 10px; }
@@ -2395,6 +2436,14 @@ INDEX_HTML = """<!doctype html>
         <h2 class="section-title">النتائج</h2>
         <div id="status" class="status">جاهز.</div>
       </div>
+      <div id="scrapeProgress" class="scrape-progress" hidden>
+        <div class="scrape-progress-track"><div id="scrapeProgressFill" class="scrape-progress-fill"></div></div>
+        <div class="scrape-progress-meta">
+          <span id="scrapeProgressCatalogs">0/0 كتالوجات</span>
+          <span id="scrapeProgressResults">0 نتيجة</span>
+          <span id="scrapeProgressErrors">0 أخطاء</span>
+        </div>
+      </div>
       <div id="resultTabs" class="result-tabs" aria-label="تصفية النتائج">
         <button class="result-tab is-active" type="button" data-tab="all">الكل</button>
         <button class="result-tab" type="button" data-tab="movies">أفلام</button>
@@ -2435,6 +2484,11 @@ INDEX_HTML = """<!doctype html>
     const resultTabs = document.querySelector("#resultTabs");
     const statsGrid = document.querySelector("#statsGrid");
     const statusBox = document.querySelector("#status");
+    const scrapeProgress = document.querySelector("#scrapeProgress");
+    const scrapeProgressFill = document.querySelector("#scrapeProgressFill");
+    const scrapeProgressCatalogs = document.querySelector("#scrapeProgressCatalogs");
+    const scrapeProgressResults = document.querySelector("#scrapeProgressResults");
+    const scrapeProgressErrors = document.querySelector("#scrapeProgressErrors");
     const playerPanel = document.querySelector("#playerPanel");
     const episodeVideo = document.querySelector("#episodeVideo");
     const playerState = document.querySelector("#playerState");
@@ -2467,6 +2521,24 @@ INDEX_HTML = """<!doctype html>
       statusBox.className = isError ? "status error" : "status";
     }
 
+    function hideScrapeProgress() {
+      scrapeProgress.hidden = true;
+      scrapeProgressFill.style.width = "0%";
+    }
+
+    function updateScrapeProgressBar(progress = {}) {
+      const completed = progress.completed_catalogs || 0;
+      const total = progress.total_catalogs || 0;
+      const current = progress.current_results || 0;
+      const errors = progress.errors || 0;
+      const percent = total > 0 ? Math.max(3, Math.min(100, Math.round((completed / total) * 100))) : 3;
+      scrapeProgress.hidden = false;
+      scrapeProgressFill.style.width = `${percent}%`;
+      scrapeProgressCatalogs.textContent = `${completed}/${total} كتالوجات`;
+      scrapeProgressResults.textContent = `${current} نتيجة`;
+      scrapeProgressErrors.textContent = `${errors} أخطاء`;
+    }
+
     function renderStats(stats = {}) {
       const values = [
         ["الإجمالي", stats.total || 0],
@@ -2479,6 +2551,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderLoadingCards(count = 12) {
+      hideScrapeProgress();
       renderStats();
       extractedItems = [];
       filteredItems = [];
@@ -2515,6 +2588,7 @@ INDEX_HTML = """<!doctype html>
       const current = progress.current_results || 0;
       const errors = progress.errors || 0;
       const stage = progress.stage === "checking" ? "فحص التشغيل المباشر" : "استخراج المكتبة الكاملة";
+      updateScrapeProgressBar(progress);
       renderStats({ total: current });
       setStatus(`${stage}: اكتمل ${completed}/${total} كتالوجات، ${current} نتيجة حالية، ${errors} أخطاء.`);
     }
@@ -2544,6 +2618,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderScrapeResult(data) {
+      hideScrapeProgress();
       renderStats(data.stats || { total: data.count || 0 });
       renderItems(data.items);
       const errors = Array.isArray(data.errors) ? data.errors : [];
@@ -2609,6 +2684,7 @@ INDEX_HTML = """<!doctype html>
         renderScrapeResult(data);
       } catch (error) {
         if (error.name === "AbortError") return;
+        hideScrapeProgress();
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;
         refreshIcons();
         setStatus(error.message, true);

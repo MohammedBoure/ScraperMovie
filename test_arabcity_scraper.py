@@ -311,6 +311,11 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("clearEpisodeCaches({ server: true })", INDEX_HTML)
         self.assertIn("/api/episode-cache/clear", INDEX_HTML)
 
+    def test_index_quality_stats_bar_labels(self):
+        self.assertIn("لديها حلقات", INDEX_HTML)
+        self.assertIn("جاهزة للتشغيل", INDEX_HTML)
+        self.assertIn("stats.with_episodes", INDEX_HTML)
+
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)
         self.assertEqual(manifest_catalog_ids(), expected)
@@ -447,6 +452,7 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["stats"]["total"], 3)
         self.assertEqual(result["stats"]["movies"], 1)
         self.assertEqual(result["stats"]["series"], 2)
+        self.assertEqual(result["stats"]["with_episodes"], 2)
         self.assertEqual(result["stats"]["sources"], 2)
 
     def test_complete_library_playable_only_filters_after_merge(self):
@@ -489,6 +495,7 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["items"][0]["name"], "Ready Movie")
         self.assertTrue(result["items"][0]["playable"])
+        self.assertEqual(result["stats"]["with_episodes"], 0)
         self.assertEqual(result["stats"]["checked"], 1)
         self.assertEqual(result["stats"]["playable"], 1)
 

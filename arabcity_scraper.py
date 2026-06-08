@@ -1147,7 +1147,16 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
 
 
 def media_stats(items: Iterable[MediaItem]) -> dict[str, int]:
-    stats = {"total": 0, "movies": 0, "series": 0, "mixed": 0, "sources": 0, "playable": 0, "checked": 0}
+    stats = {
+        "total": 0,
+        "movies": 0,
+        "series": 0,
+        "mixed": 0,
+        "sources": 0,
+        "with_episodes": 0,
+        "playable": 0,
+        "checked": 0,
+    }
     sources: set[str] = set()
     for item in items:
         stats["total"] += 1
@@ -1157,6 +1166,8 @@ def media_stats(items: Iterable[MediaItem]) -> dict[str, int]:
             stats["series"] += 1
         else:
             stats["mixed"] += 1
+        if item.episode_count and item.episode_count > 0:
+            stats["with_episodes"] += 1
         if item.playable_checked:
             stats["checked"] += 1
         if item.playable:
@@ -1958,13 +1969,12 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderStats(stats = {}) {
-      const playableValue = stats.checked ? (stats.playable || 0) : "—";
       const values = [
         ["الإجمالي", stats.total || 0],
         ["الأفلام", stats.movies || 0],
         ["المسلسلات", stats.series || 0],
-        ["جاهز", playableValue],
-        ["المصادر", stats.sources || 0],
+        ["لديها حلقات", stats.with_episodes || 0],
+        ["جاهزة للتشغيل", stats.playable || 0],
       ];
       statsGrid.innerHTML = values.map(([label, value]) => `<div class="stat-card"><strong>${value}</strong><span>${label}</span></div>`).join("");
     }

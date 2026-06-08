@@ -1,16 +1,21 @@
 import unittest
+from unittest.mock import patch
 
 from arabcity_scraper import (
     CATALOG_ROUTES,
+    PlayerLink,
     count_episodes_from_html,
     detect_episode_number,
+    direct_video_players,
     extract_episode_links,
     extract_media_items,
     extract_player_links,
     is_allowed_source_url,
     media_item_from_addon_meta,
     normalize_media_name,
+    player_from_addon_stream,
     request_safe_url,
+    scrape_player,
     stremio_url,
 )
 
@@ -97,6 +102,30 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(players[0].kind, "video")
         self.assertEqual(players[0].url, "https://cdn.example.test/media/episode-1.mp4")
         self.assertEqual(players[1].url, "https://tv.akwam.tv/embed/episode-1")
+
+    def test_direct_video_players_filters_embeds(self):
+        players = direct_video_players(
+            [
+                PlayerLink("https://cdn.example.test/media/episode-1.mp4", "video"),
+                PlayerLink("https://tv.akwam.tv/embed/episode-1", "iframe"),
+            ]
+        )
+        self.assertEqual(len(players), 1)
+        self.assertEqual(players[0].url, "https://cdn.example.test/media/episode-1.mp4")
+
+    def test_addon_stream_url_is_direct_video_player(self):
+        payload = {"streams": [{"url": "https://cdn.example.test/play?id=1", "title": "Main"}]}
+        with patch("arabcity_scraper.fetch_json", return_value=payload):
+            players = player_from_addon_stream("arabcity:episode:1")
+        self.assertEqual(len(players), 1)
+        self.assertEqual(players[0].kind, "video")
+        self.assertEqual(players[0].url, "https://cdn.example.test/play?id=1")
+
+    def test_scrape_player_rejects_page_only_fallback(self):
+        with patch("arabcity_scraper.fetch_html", return_value='<iframe src="/embed/episode-1"></iframe>'):
+            with self.assertRaises(ValueError) as context:
+                scrape_player("https://tv.akwam.tv/watch/episode-1")
+        self.assertIn("رابط فيديو مباشر", str(context.exception))
 
     def test_stremio_url_encodes_full_id_segment(self):
         url = stremio_url(

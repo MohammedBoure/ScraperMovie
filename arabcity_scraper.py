@@ -782,12 +782,18 @@ def player_from_addon_stream(stream_id: str, item_type: str = "ArabCity-Akwam") 
     for stream in streams:
         if not isinstance(stream, dict):
             continue
-        stream_url = str(stream.get("url") or stream.get("externalUrl") or "")
+        direct_url = str(stream.get("url") or "")
+        external_url = str(stream.get("externalUrl") or "")
+        stream_url = direct_url or (external_url if is_video_url(external_url) else "")
         if not stream_url or not is_allowed_source_url(stream_url):
             continue
         title = clean_spaces(str(stream.get("title") or stream.get("name") or "ArabCity stream"))
-        players.append(PlayerLink(url=stream_url, kind="video" if is_video_url(stream_url) else "iframe", title=title))
+        players.append(PlayerLink(url=stream_url, kind="video", title=title))
     return players
+
+
+def direct_video_players(players: Iterable[PlayerLink]) -> list[PlayerLink]:
+    return [player for player in players if player.kind == "video" and is_allowed_source_url(player.url)]
 
 
 def media_item_from_addon_meta(meta: dict[str, object], route: CatalogRoute) -> MediaItem | None:
@@ -854,7 +860,7 @@ def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
     errors: list[str] = []
     if stream_id:
         try:
-            players = player_from_addon_stream(stream_id)
+            players = direct_video_players(player_from_addon_stream(stream_id))
         except RuntimeError as exc:
             errors.append(str(exc))
     if not media_url:
@@ -863,8 +869,10 @@ def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
         raise ValueError("Unsupported media URL")
     if not players:
         document = fetch_html(media_url)
-        players = extract_player_links(document, media_url)
-    selected = players[0] if players else PlayerLink(url=media_url, kind="page", title="Episode page")
+        players = direct_video_players(extract_player_links(document, media_url))
+    if not players:
+        raise ValueError("لا يوجد رابط فيديو مباشر قابل للتشغيل داخل الصفحة.")
+    selected = players[0]
     return {
         "url": media_url,
         "selected": selected.to_dict(),
@@ -978,6 +986,7 @@ INDEX_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ArabCity Cinema</title>
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -1154,7 +1163,7 @@ INDEX_HTML = """<!doctype html>
       color: var(--ink);
     }
     .toggle input { width: 18px; min-height: auto; accent-color: var(--brand-2); }
-    .primary-button, .episodes-button, .watch-now, .player-controls a, .player-controls button {
+    .primary-button, .episodes-button, .watch-now, .player-controls button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -1171,6 +1180,7 @@ INDEX_HTML = """<!doctype html>
       transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease, background .22s ease;
     }
     .primary-button:hover, .episodes-button:hover, .watch-now:hover { transform: translateY(-2px); box-shadow: 0 16px 32px rgba(22,184,166,.22); }
+    .results-section { min-height: 520px; }
     .status-row {
       display: flex;
       align-items: center;
@@ -1208,6 +1218,12 @@ INDEX_HTML = """<!doctype html>
       text-align: left;
     }
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
+    .watch-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+      gap: 18px;
+      align-items: start;
+    }
     .media-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
@@ -1277,7 +1293,6 @@ INDEX_HTML = """<!doctype html>
     }
     .pill { display: inline-flex; align-items: center; gap: 5px; color: #a7f3d0; font-weight: 800; }
     .actions { display: grid; gap: 8px; margin-top: 2px; }
-    .secondary-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
     .episodes-button {
       width: 100%;
       min-height: 38px;
@@ -1285,7 +1300,7 @@ INDEX_HTML = """<!doctype html>
       border: 1px solid var(--line);
       box-shadow: none;
     }
-    .open-source {
+    .direct-chip {
       min-height: 38px;
       display: inline-flex;
       align-items: center;
@@ -1299,7 +1314,7 @@ INDEX_HTML = """<!doctype html>
       font-size: .82rem;
       font-weight: 800;
     }
-    .secondary-single { grid-template-columns: 1fr; }
+    .direct-chip { color: #99f6e4; border-color: rgba(22,184,166,.28); background: rgba(22,184,166,.08); }
     .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; padding-top: 2px; }
     .episode-link {
       display: flex;
@@ -1316,6 +1331,8 @@ INDEX_HTML = """<!doctype html>
       font-weight: 700;
     }
     .episode-link:hover { border-color: rgba(22,184,166,.42); color: #99f6e4; }
+    .episode-link small { color: var(--faint); font-size: .72rem; font-weight: 800; }
+    .episode-link.is-direct small { color: #99f6e4; }
     .inline-error { color: #fecdd3; font-size: .82rem; line-height: 1.6; }
     .empty-state {
       grid-column: 1 / -1;
@@ -1346,33 +1363,49 @@ INDEX_HTML = """<!doctype html>
     .skeleton-line.short { width: 58%; }
     @keyframes shimmer { to { background-position: -220% 0; } }
     .player-panel {
-      display: none;
+      display: block;
       position: sticky;
-      bottom: 0;
+      top: 96px;
       z-index: 18;
-      margin-top: 24px;
+      min-width: 0;
       border: 1px solid var(--line-strong);
-      border-radius: 8px 8px 0 0;
+      border-radius: 8px;
       background: rgba(3,5,12,.94);
-      box-shadow: 0 -22px 58px rgba(0,0,0,.42);
+      box-shadow: 0 22px 58px rgba(0,0,0,.36);
       overflow: hidden;
       backdrop-filter: blur(18px);
     }
-    .player-panel.active { display: block; }
     .player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; color: white; border-bottom: 1px solid var(--line); }
     .player-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
     .player-controls { display: flex; gap: 8px; flex: 0 0 auto; }
-    .player-controls a, .player-controls button { min-height: 36px; background: rgba(255,255,255,.075); border: 1px solid var(--line); box-shadow: none; }
-    .player-controls a:hover, .player-controls button:hover { background: var(--accent); }
-    .player-frame { display: block; width: 100%; height: min(68vh, 720px); border: 0; background: #000; }
-    .player-video { display: block; width: 100%; max-height: min(68vh, 720px); background: #000; }
-    .player-frame[hidden], .player-video[hidden] { display: none; }
+    .player-controls button { min-height: 36px; background: rgba(255,255,255,.075); border: 1px solid var(--line); box-shadow: none; }
+    .player-controls button:hover { background: var(--accent); }
+    .player-body { min-height: 260px; display: grid; background: #000; }
+    .player-state {
+      min-height: 260px;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      color: var(--muted);
+      background:
+        linear-gradient(135deg, rgba(79,70,229,.16), rgba(22,184,166,.08)),
+        #050710;
+    }
+    .player-state strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 1rem; }
+    .player-state p { margin: 0; line-height: 1.7; }
+    .player-state.error strong { color: #fecdd3; }
+    .player-state svg { width: 34px; height: 34px; margin-bottom: 12px; color: #99f6e4; }
+    .player-video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: min(62vh, 640px); background: #000; }
+    .player-video[hidden], .player-state[hidden] { display: none; }
     footer { margin-top: 44px; padding: 24px 0 0; border-top: 1px solid var(--line); color: var(--faint); text-align: center; font-size: .86rem; }
     @media (max-width: 960px) {
       .nav-pills { display: none; }
       .hero { grid-template-columns: 1fr; }
       .control-panel { grid-template-columns: 1fr 1fr; }
       .control-panel .primary-button { grid-column: 1 / -1; }
+      .watch-layout { grid-template-columns: 1fr; }
+      .player-panel { position: sticky; top: auto; bottom: 0; order: -1; }
     }
     @media (max-width: 620px) {
       .navbar { min-height: 66px; }
@@ -1387,8 +1420,8 @@ INDEX_HTML = """<!doctype html>
       .media-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
       .card-info { padding: 10px; }
       .card-title { font-size: .88rem; min-height: 42px; }
-      .secondary-actions { grid-template-columns: 1fr; }
-      .player-frame { height: 62vh; }
+      .player-body, .player-state { min-height: 210px; }
+      .player-video { max-height: 56vh; }
     }
   </style>
 </head>
@@ -1439,18 +1472,23 @@ INDEX_HTML = """<!doctype html>
         <h2 class="section-title">النتائج</h2>
         <div id="status" class="status">جاهز.</div>
       </div>
-      <div id="rows" class="media-grid"></div>
-    </section>
-    <section id="playerPanel" class="player-panel" aria-live="polite">
-      <div class="player-bar">
-        <div id="playerTitle" class="player-title">المشغل</div>
-        <div class="player-controls">
-          <a id="playerExternal" href="#" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>فتح خارجي</span></a>
-          <button id="playerClose" type="button"><i data-lucide="x"></i><span>إغلاق</span></button>
-        </div>
+      <div class="watch-layout">
+        <div id="rows" class="media-grid"></div>
+        <section id="playerPanel" class="player-panel" aria-live="polite">
+          <div class="player-bar">
+            <div id="playerTitle" class="player-title">المشغل المباشر</div>
+            <div class="player-controls">
+              <button id="playerClose" type="button"><i data-lucide="x"></i><span>إغلاق</span></button>
+            </div>
+          </div>
+          <div class="player-body">
+            <div id="playerState" class="player-state">
+              <div><i data-lucide="play-circle"></i><strong>اختر حلقة أو فيلما</strong><p>أي رابط قابل للتشغيل سيعمل هنا مباشرة داخل الصفحة.</p></div>
+            </div>
+            <video id="episodeVideo" class="player-video" controls playsinline hidden></video>
+          </div>
+        </section>
       </div>
-      <iframe id="episodePlayer" class="player-frame" title="مشغل الحلقة" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer"></iframe>
-      <video id="episodeVideo" class="player-video" controls playsinline hidden></video>
     </section>
     <footer>ArabCity Cinema - واجهة مشاهدة محلية مستوحاة من الواجهات السينمائية الحديثة.</footer>
   </main>
@@ -1459,12 +1497,13 @@ INDEX_HTML = """<!doctype html>
     const rows = document.querySelector("#rows");
     const statusBox = document.querySelector("#status");
     const playerPanel = document.querySelector("#playerPanel");
-    const episodePlayer = document.querySelector("#episodePlayer");
     const episodeVideo = document.querySelector("#episodeVideo");
+    const playerState = document.querySelector("#playerState");
     const playerTitle = document.querySelector("#playerTitle");
-    const playerExternal = document.querySelector("#playerExternal");
     const playerClose = document.querySelector("#playerClose");
     let autoLoadController = null;
+    let hlsInstance = null;
+    let searchTimer = null;
 
     function refreshIcons() {
       if (window.lucide) window.lucide.createIcons();
@@ -1567,15 +1606,12 @@ INDEX_HTML = """<!doctype html>
 
     function actionsMarkup(item) {
       const title = escapeHtml(item.name);
-      const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>مشاهدة</span></a>`;
-      const openLink = `<a class="open-source" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" title="فتح المصدر"><i data-lucide="external-link"></i><span>المصدر</span></a>`;
-      if (item.kind !== "series") return `<div class="actions">${watchLink}<div class="secondary-actions">${openLink}</div></div>`;
+      const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>تشغيل داخل الصفحة</span></a>`;
+      if (item.kind !== "series") return `<div class="actions">${watchLink}<span class="direct-chip"><i data-lucide="monitor-play"></i>مشغل مباشر فقط</span></div>`;
       return `
         <div class="actions">
           <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
-          <div class="secondary-actions secondary-single">
-            ${openLink}
-          </div>
+          <span class="direct-chip"><i data-lucide="monitor-play"></i>الحلقات تعمل هنا عند توفر رابط مباشر</span>
           <div class="episode-list"></div>
         </div>
       `;
@@ -1590,33 +1626,66 @@ INDEX_HTML = """<!doctype html>
       return String(value || "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[ch]));
     }
 
-    function openPlayer(url, title, kind = "iframe") {
-      playerTitle.textContent = title || "المشغل";
-      playerExternal.href = url;
-      episodePlayer.src = "about:blank";
+    function destroyHls() {
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+    }
+
+    function showPlayerState(title, message, isError = false) {
+      destroyHls();
+      playerTitle.textContent = title || "المشغل المباشر";
       episodeVideo.pause();
       episodeVideo.removeAttribute("src");
       episodeVideo.load();
-      if (kind === "video") {
-        episodePlayer.hidden = true;
-        episodeVideo.hidden = false;
+      episodeVideo.hidden = true;
+      playerState.hidden = false;
+      playerState.className = isError ? "player-state error" : "player-state";
+      playerState.innerHTML = `<div><i data-lucide="${isError ? "circle-alert" : "play-circle"}"></i><strong>${escapeHtml(title || "المشغل المباشر")}</strong><p>${escapeHtml(message)}</p></div>`;
+      refreshIcons();
+    }
+
+    function isHlsUrl(url) {
+      return new URL(url, window.location.href).pathname.toLowerCase().includes(".m3u8");
+    }
+
+    function openPlayer(url, title) {
+      destroyHls();
+      playerTitle.textContent = title || "المشغل المباشر";
+      playerState.hidden = true;
+      episodeVideo.hidden = false;
+      episodeVideo.pause();
+      episodeVideo.removeAttribute("src");
+      episodeVideo.load();
+      if (isHlsUrl(url) && window.Hls && window.Hls.isSupported()) {
+        hlsInstance = new window.Hls({ enableWorker: true });
+        hlsInstance.loadSource(url);
+        hlsInstance.attachMedia(episodeVideo);
+        hlsInstance.on(window.Hls.Events.ERROR, (_event, data) => {
+          if (data && data.fatal) {
+            showPlayerState(title, "تعذر تشغيل رابط الفيديو المباشر داخل المتصفح.", true);
+            setStatus("تعذر تشغيل رابط الفيديو المباشر.", true);
+          }
+        });
+      } else {
         episodeVideo.src = url;
         episodeVideo.load();
-      } else {
-        episodeVideo.hidden = true;
-        episodePlayer.hidden = false;
-        episodePlayer.src = url;
       }
-      playerPanel.classList.add("active");
-      playerPanel.scrollIntoView({ behavior: "smooth", block: "end" });
+      const playPromise = episodeVideo.play();
+      if (playPromise) playPromise.catch(() => {});
+      playerPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
 
     playerClose.addEventListener("click", () => {
-      episodePlayer.src = "about:blank";
-      episodeVideo.pause();
-      episodeVideo.removeAttribute("src");
-      episodeVideo.load();
-      playerPanel.classList.remove("active");
+      showPlayerState("المشغل المباشر", "اختر حلقة أو فيلما وسيعمل هنا مباشرة داخل الصفحة.");
+    });
+
+    episodeVideo.addEventListener("error", () => {
+      if (!episodeVideo.hidden && episodeVideo.currentSrc) {
+        showPlayerState(playerTitle.textContent, "تعذر تشغيل رابط الفيديو المباشر داخل المتصفح.", true);
+        setStatus("تعذر تشغيل رابط الفيديو المباشر.", true);
+      }
     });
 
     document.querySelector("#scrapeForm").addEventListener("submit", async (event) => {
@@ -1625,6 +1694,12 @@ INDEX_HTML = """<!doctype html>
     });
 
     catalog.addEventListener("change", () => loadItems());
+    document.querySelector("#pages").addEventListener("change", () => loadItems());
+    document.querySelector("#details").addEventListener("change", () => loadItems());
+    document.querySelector("#search").addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => loadItems(), 420);
+    });
 
     rows.addEventListener("click", async (event) => {
       const button = event.target.closest(".episodes-button");
@@ -1643,11 +1718,13 @@ INDEX_HTML = """<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
         if (!data.episodes.length) {
-          list.innerHTML = `<a class="episode-link episode-play" href="${escapeHtml(button.dataset.url)}" data-title="صفحة العمل"><span>مشاهدة هنا</span><i data-lucide="play"></i></a>`;
+          list.innerHTML = `<span class="inline-error">لا توجد حلقات جاهزة للمشغل المباشر لهذا العمل.</span>`;
         } else {
           list.innerHTML = data.episodes.map(episode => {
             const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><i data-lucide="play"></i></a>`;
+            const directClass = episode.stream_id ? " is-direct" : "";
+            const directLabel = episode.stream_id ? "مباشر" : "تحقق";
+            return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
           }).join("");
         }
         button.dataset.loaded = "1";
@@ -1655,7 +1732,7 @@ INDEX_HTML = """<!doctype html>
         list.innerHTML = `<span class="inline-error">${escapeHtml(error.message)}</span>`;
       } finally {
         button.disabled = false;
-        button.innerHTML = `<i data-lucide="list-video"></i><span>الحلقات</span>`;
+        button.innerHTML = `<i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span>`;
         refreshIcons();
       }
     });
@@ -1671,11 +1748,12 @@ INDEX_HTML = """<!doctype html>
         const response = await fetch(`/api/player?${params}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر تجهيز المشغل");
-        const selected = data.selected || { url: link.href, kind: "page" };
-        openPlayer(selected.url, title, selected.kind);
-        setStatus(selected.kind === "page" ? "لم يتم العثور على رابط مباشر، تم فتح صفحة الحلقة داخل المشغل." : "تم تجهيز المشغل.");
+        const selected = data.selected;
+        if (!selected || selected.kind !== "video") throw new Error("لا يوجد رابط فيديو مباشر قابل للتشغيل داخل الصفحة.");
+        openPlayer(selected.url, title);
+        setStatus("تم تشغيل الفيديو داخل الصفحة.");
       } catch (error) {
-        openPlayer(link.href, title, "page");
+        showPlayerState(title, error.message, true);
         setStatus(error.message, true);
       }
     });

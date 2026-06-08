@@ -1071,21 +1071,23 @@ INDEX_HTML = """<!doctype html>
       border-radius: 999px;
       background: rgba(255,255,255,.035);
     }
-    main { width: min(1280px,100%); margin: 0 auto; padding: 26px clamp(12px,3vw,34px) 42px; }
+    main { width: min(1440px,100%); margin: 0 auto; padding: 18px clamp(12px,3vw,32px) 42px; }
     .hero {
       position: relative;
-      min-height: 330px;
+      min-height: 0;
       display: grid;
-      align-items: end;
+      grid-template-columns: minmax(0,1fr) minmax(360px,.58fr);
+      align-items: stretch;
+      gap: 22px;
       overflow: hidden;
       border-bottom: 1px solid var(--line);
-      padding: 46px 0 34px;
+      padding: 22px 0 24px;
     }
     .hero::after {
       content: "";
       position: absolute;
-      inset: 12px 0 auto;
-      height: 280px;
+      inset: 6px 0 auto;
+      height: 220px;
       border-radius: 8px;
       background:
         linear-gradient(to top, rgba(7,9,18,.98), rgba(7,9,18,.52), rgba(7,9,18,.18)),
@@ -1094,7 +1096,7 @@ INDEX_HTML = """<!doctype html>
       filter: saturate(1.08);
       z-index: -1;
     }
-    .hero-content { width: min(900px,100%); }
+    .hero-content { min-width: 0; display: grid; align-content: center; }
     .eyebrow {
       display: inline-flex;
       align-items: center;
@@ -1109,14 +1111,15 @@ INDEX_HTML = """<!doctype html>
       font-weight: 700;
       margin-bottom: 16px;
     }
-    h1 { margin: 0; max-width: 760px; font-size: clamp(32px,5vw,58px); line-height: 1.1; letter-spacing: 0; }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(28px,3.8vw,46px); line-height: 1.12; letter-spacing: 0; }
     .hero p { margin: 14px 0 0; max-width: 720px; color: var(--muted); font-size: 1rem; line-height: 1.8; }
     .control-panel {
       display: grid;
-      grid-template-columns: minmax(220px, 1.8fr) minmax(112px,.7fr) minmax(190px,1fr) minmax(180px,.9fr) auto;
+      grid-template-columns: 1fr 120px;
       gap: 12px;
       align-items: end;
-      margin-top: 26px;
+      align-self: center;
+      margin-top: 0;
       padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -1124,6 +1127,9 @@ INDEX_HTML = """<!doctype html>
       backdrop-filter: blur(16px);
       box-shadow: 0 20px 46px rgba(0,0,0,.26);
     }
+    .control-panel label:first-child,
+    .control-panel .search-field,
+    .control-panel .primary-button { grid-column: 1 / -1; }
     label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
     select, input {
       min-height: 44px;
@@ -1204,8 +1210,8 @@ INDEX_HTML = """<!doctype html>
     .status.error { color: #fecdd3; border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.1); }
     .media-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
-      gap: 18px;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 16px;
       align-items: start;
     }
     .media-card {
@@ -1284,11 +1290,16 @@ INDEX_HTML = """<!doctype html>
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      gap: 7px;
+      padding: 0 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
       color: var(--muted);
       background: rgba(255,255,255,.04);
+      font-size: .82rem;
+      font-weight: 800;
     }
+    .secondary-single { grid-template-columns: 1fr; }
     .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; padding-top: 2px; }
     .episode-link {
       display: flex;
@@ -1318,6 +1329,22 @@ INDEX_HTML = """<!doctype html>
       background: rgba(255,255,255,.025);
       padding: 24px;
     }
+    .skeleton-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(20,23,39,.52);
+    }
+    .skeleton-poster, .skeleton-line {
+      background: linear-gradient(90deg, rgba(255,255,255,.04), rgba(255,255,255,.1), rgba(255,255,255,.04));
+      background-size: 220% 100%;
+      animation: shimmer 1.25s infinite linear;
+    }
+    .skeleton-poster { aspect-ratio: 2 / 3; }
+    .skeleton-body { display: grid; gap: 9px; padding: 13px; }
+    .skeleton-line { height: 13px; border-radius: 8px; }
+    .skeleton-line.short { width: 58%; }
+    @keyframes shimmer { to { background-position: -220% 0; } }
     .player-panel {
       display: none;
       position: sticky;
@@ -1343,6 +1370,7 @@ INDEX_HTML = """<!doctype html>
     footer { margin-top: 44px; padding: 24px 0 0; border-top: 1px solid var(--line); color: var(--faint); text-align: center; font-size: .86rem; }
     @media (max-width: 960px) {
       .nav-pills { display: none; }
+      .hero { grid-template-columns: 1fr; }
       .control-panel { grid-template-columns: 1fr 1fr; }
       .control-panel .primary-button { grid-column: 1 / -1; }
     }
@@ -1351,8 +1379,8 @@ INDEX_HTML = """<!doctype html>
       .brand { font-size: 1.08rem; }
       .brand-mark { width: 34px; height: 34px; }
       main { padding-inline: 12px; }
-      .hero { min-height: auto; padding-top: 28px; }
-      .hero::after { height: 260px; }
+      .hero { min-height: auto; padding-top: 20px; }
+      .hero::after { height: 230px; }
       .control-panel { grid-template-columns: 1fr; }
       .status-row { align-items: stretch; flex-direction: column; }
       .status { justify-content: center; text-align: center; }
@@ -1385,9 +1413,9 @@ INDEX_HTML = """<!doctype html>
   <main>
     <section class="hero">
       <div class="hero-content">
-        <div class="eyebrow"><i data-lucide="sparkles"></i> تجربة مستوحاة من Showtime4U</div>
-        <h1>استكشف الكتالوج وشاهد الحلقات داخل مشغل أنيق.</h1>
-        <p>واجهة داكنة وسريعة لكتالوجات ArabCity، مع بطاقات بوسترات وروابط حلقات ومشغل مدمج يحاول استخدام روابط المشاهدة المباشرة أولا.</p>
+        <div class="eyebrow"><i data-lucide="sparkles"></i> المكتبة تُجهّز تلقائيا</div>
+        <h1>كل الكتالوج أمامك مباشرة، نظيف وجاهز للمشاهدة.</h1>
+        <p>تفتح الصفحة فتبدأ المكتبة بالتحميل وحدها. يمكنك فقط تغيير الكتالوج أو البحث لاحقا، بينما تبقى مساحة العرض مخصصة للبوسترات والحلقات والمشغل.</p>
         <form id="scrapeForm" class="control-panel">
           <label>الكتالوج
             <select id="catalog"></select>
@@ -1395,14 +1423,14 @@ INDEX_HTML = """<!doctype html>
           <label>عدد الصفحات
             <input id="pages" type="number" min="1" max="25" value="1">
           </label>
-          <label>بحث داخل النتائج
-            <input id="search" type="search" placeholder="اختياري">
-          </label>
           <label class="toggle">
             <input id="details" type="checkbox" checked>
             حساب الحلقات
           </label>
-          <button class="primary-button" type="submit"><i data-lucide="search"></i><span>بدء الاستخراج</span></button>
+          <label class="search-field">بحث داخل النتائج
+            <input id="search" type="search" placeholder="اختياري">
+          </label>
+          <button class="primary-button" type="submit"><i data-lucide="refresh-cw"></i><span>تحديث المكتبة</span></button>
         </form>
       </div>
     </section>
@@ -1436,6 +1464,7 @@ INDEX_HTML = """<!doctype html>
     const playerTitle = document.querySelector("#playerTitle");
     const playerExternal = document.querySelector("#playerExternal");
     const playerClose = document.querySelector("#playerClose");
+    let autoLoadController = null;
 
     function refreshIcons() {
       if (window.lucide) window.lucide.createIcons();
@@ -1444,6 +1473,19 @@ INDEX_HTML = """<!doctype html>
     function setStatus(text, isError = false) {
       statusBox.textContent = text;
       statusBox.className = isError ? "status error" : "status";
+    }
+
+    function renderLoadingCards(count = 12) {
+      rows.innerHTML = Array.from({ length: count }, () => `
+        <div class="skeleton-card">
+          <div class="skeleton-poster"></div>
+          <div class="skeleton-body">
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line short"></div>
+            <div class="skeleton-line"></div>
+          </div>
+        </div>
+      `).join("");
     }
 
     async function loadCatalogs() {
@@ -1456,6 +1498,35 @@ INDEX_HTML = """<!doctype html>
         catalog.appendChild(option);
       }
       refreshIcons();
+      const defaultOption = catalog.querySelector('option[value="akoam-series-all"]');
+      if (defaultOption) catalog.value = defaultOption.value;
+      await loadItems({ initial: true });
+    }
+
+    async function loadItems({ initial = false } = {}) {
+      if (autoLoadController) autoLoadController.abort();
+      autoLoadController = new AbortController();
+      renderLoadingCards(initial ? 14 : 10);
+      setStatus(initial ? "جاري تجهيز المكتبة تلقائيا..." : "جاري تحديث المكتبة...");
+      const params = new URLSearchParams({
+        catalog: catalog.value,
+        pages: document.querySelector("#pages").value || "1",
+        search: document.querySelector("#search").value || "",
+        details: document.querySelector("#details").checked ? "1" : "0",
+      });
+      try {
+        const response = await fetch(`/api/scrape?${params}`, { signal: autoLoadController.signal });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "تعذر تحميل المكتبة");
+        renderItems(data.items);
+        const suffix = data.errors.length ? ` مع ${data.errors.length} أخطاء` : "";
+        setStatus(`المكتبة جاهزة: ${data.count} نتيجة من ${data.catalog_name}${suffix}.`);
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;
+        refreshIcons();
+        setStatus(error.message, true);
+      }
     }
 
     function renderItems(items) {
@@ -1471,6 +1542,7 @@ INDEX_HTML = """<!doctype html>
         const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : `<div class="raw">&nbsp;</div>`;
         const kindLabel = item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط";
         const episodes = item.kind === "series" ? (item.episode_count || "غير معروف") : "-";
+        const countLabel = item.kind === "series" ? (item.episode_count ? `${episodes} حلقة` : "الحلقات جاهزة") : "فيلم";
         card.innerHTML = `
           <div class="poster-wrap">
             ${posterMarkup(item)}
@@ -1483,7 +1555,7 @@ INDEX_HTML = """<!doctype html>
             ${raw}
             <div class="card-meta">
               <span class="pill"><i data-lucide="layers"></i>${kindLabel}</span>
-              <span>${item.kind === "series" ? `${episodes} حلقة` : "فيلم"}</span>
+              <span>${countLabel}</span>
             </div>
             ${actionsMarkup(item)}
           </div>
@@ -1496,13 +1568,12 @@ INDEX_HTML = """<!doctype html>
     function actionsMarkup(item) {
       const title = escapeHtml(item.name);
       const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>مشاهدة</span></a>`;
-      const openLink = `<a class="open-source" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" title="فتح المصدر"><i data-lucide="external-link"></i></a>`;
+      const openLink = `<a class="open-source" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" title="فتح المصدر"><i data-lucide="external-link"></i><span>المصدر</span></a>`;
       if (item.kind !== "series") return `<div class="actions">${watchLink}<div class="secondary-actions">${openLink}</div></div>`;
       return `
         <div class="actions">
-          ${watchLink}
-          <div class="secondary-actions">
-            <button class="episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات</span></button>
+          <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
+          <div class="secondary-actions secondary-single">
             ${openLink}
           </div>
           <div class="episode-list"></div>
@@ -1550,30 +1621,15 @@ INDEX_HTML = """<!doctype html>
 
     document.querySelector("#scrapeForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      rows.innerHTML = "";
-      setStatus("جار الاستخراج...");
-      const params = new URLSearchParams({
-        catalog: catalog.value,
-        pages: document.querySelector("#pages").value || "1",
-        search: document.querySelector("#search").value || "",
-        details: document.querySelector("#details").checked ? "1" : "0",
-      });
-      try {
-        const response = await fetch(`/api/scrape?${params}`);
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "تعذر الاستخراج");
-        renderItems(data.items);
-        const suffix = data.errors.length ? ` مع ${data.errors.length} أخطاء` : "";
-        setStatus(`تم استخراج ${data.count} نتيجة من ${data.catalog_name}${suffix}.`);
-      } catch (error) {
-        setStatus(error.message, true);
-      }
+      loadItems();
     });
+
+    catalog.addEventListener("change", () => loadItems());
 
     rows.addEventListener("click", async (event) => {
       const button = event.target.closest(".episodes-button");
       if (!button) return;
-      const list = button.parentElement.nextElementSibling;
+      const list = button.closest(".actions").querySelector(".episode-list");
       if (button.dataset.loaded === "1") {
         list.hidden = !list.hidden;
         return;
@@ -1609,22 +1665,28 @@ INDEX_HTML = """<!doctype html>
       if (!link) return;
       event.preventDefault();
       const title = link.dataset.title || link.textContent;
-      setStatus("جاري استخراج رابط المشغل...");
+      setStatus("جاري تجهيز المشغل...");
       try {
         const params = new URLSearchParams({ url: link.href, stream_id: link.dataset.streamId || "" });
         const response = await fetch(`/api/player?${params}`);
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "تعذر استخراج رابط المشغل");
+        if (!response.ok) throw new Error(data.error || "تعذر تجهيز المشغل");
         const selected = data.selected || { url: link.href, kind: "page" };
         openPlayer(selected.url, title, selected.kind);
-        setStatus(selected.kind === "page" ? "لم يتم العثور على رابط مباشر، تم فتح صفحة الحلقة داخل المشغل." : "تم استخراج رابط المشغل.");
+        setStatus(selected.kind === "page" ? "لم يتم العثور على رابط مباشر، تم فتح صفحة الحلقة داخل المشغل." : "تم تجهيز المشغل.");
       } catch (error) {
         openPlayer(link.href, title, "page");
         setStatus(error.message, true);
       }
     });
 
-    loadCatalogs().catch(error => setStatus(error.message, true));
+    renderLoadingCards(14);
+    setStatus("جاري تجهيز المكتبة تلقائيا...");
+    loadCatalogs().catch(error => {
+      rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز الكتالوجات</h3><p>${escapeHtml(error.message)}</p></div></div>`;
+      refreshIcons();
+      setStatus(error.message, true);
+    });
     refreshIcons();
   </script>
 </body>

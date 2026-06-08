@@ -6,6 +6,7 @@ from arabcity_scraper import (
     detect_episode_number,
     extract_episode_links,
     extract_media_items,
+    is_allowed_source_url,
     normalize_media_name,
 )
 
@@ -71,6 +72,11 @@ class ArabCityScraperTests(unittest.TestCase):
         episodes = extract_episode_links(detail_html, "https://ak.sv/series/ghost-lawyer")
         self.assertEqual([episode.number for episode in episodes], [12, 3, 1])
         self.assertEqual(episodes[0].url, "https://ak.sv/watch/ghost-lawyer-12")
+
+    def test_episode_source_url_accepts_current_public_domains(self):
+        self.assertTrue(is_allowed_source_url("https://current-akwam.example/series/from"))
+        self.assertFalse(is_allowed_source_url("http://127.0.0.1:8766/series/from"))
+        self.assertFalse(is_allowed_source_url("http://localhost:8766/series/from"))
 
 
 if __name__ == "__main__":

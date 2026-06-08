@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
 import json
 import os
 import re
@@ -495,18 +496,43 @@ def count_episodes_from_html(document: str) -> int | None:
     return max(episodes) if episodes else None
 
 
+def is_private_or_local_host(host: str) -> bool:
+    host = host.strip("[]").casefold()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
 def is_allowed_source_url(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return False
     host = parsed.netloc.casefold()
+    if "@" in host:
+        return False
+    hostname = parsed.hostname or ""
+    if is_private_or_local_host(hostname):
+        return False
     allowed_hosts = {
         urlparse(base_url).netloc.casefold()
         for provider in ("akwam", "alooytv")
         for base_url in provider_bases(provider)
         if urlparse(base_url).netloc
     }
-    return any(host == allowed or host.endswith("." + allowed) for allowed in allowed_hosts)
+    if any(host == allowed or host.endswith("." + allowed) for allowed in allowed_hosts):
+        return True
+    return "." in hostname
 
 
 def looks_like_episode_link(title: str, url: str) -> bool:

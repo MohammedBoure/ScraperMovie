@@ -58,6 +58,21 @@ EPISODE_LINKS_CACHE_LOCK = Lock()
 CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool], dict[str, object]] = OrderedDict()
 CATALOG_CACHE_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+ARABIC_SEARCH_TRANSLATION = str.maketrans(
+    {
+        "أ": "ا",
+        "إ": "ا",
+        "آ": "ا",
+        "ٱ": "ا",
+        "ى": "ي",
+        "ئ": "ي",
+        "ؤ": "و",
+        "ة": "ه",
+        "ۀ": "ه",
+        "ـ": "",
+    }
+)
+ARABIC_DIACRITICS_RE = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
 
 
 MANIFEST = {
@@ -183,6 +198,7 @@ class MediaItem:
     url: str
     source: str
     image: str = ""
+    description: str = ""
     episode_count: int | None = None
     playable: bool = False
     playable_checked: bool = False
@@ -197,6 +213,7 @@ class MediaItem:
             "url": self.url,
             "source": self.source,
             "image": self.image,
+            "description": self.description,
             "episode_count": self.episode_count,
             "playable": self.playable,
             "playable_checked": self.playable_checked,
@@ -337,6 +354,47 @@ class PlayerExtractor(HTMLParser):
 
 def clean_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def normalize_search_text(value: object) -> str:
+    text = clean_spaces(str(value or ""))
+    text = ARABIC_DIACRITICS_RE.sub("", text)
+    text = text.translate(EPISODE_DIGIT_TRANSLATION).translate(ARABIC_SEARCH_TRANSLATION)
+    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
+    return clean_spaces(text.casefold())
+
+
+def kind_search_terms(kind: str) -> list[str]:
+    if kind == "series":
+        return ["series", "show", "tv", "مسلسل", "مسلسلات"]
+    if kind == "movie":
+        return ["movie", "film", "فيلم", "افلام", "أفلام"]
+    return [kind, "mixed", "مختلط"] if kind else []
+
+
+def item_search_text(item: "MediaItem") -> str:
+    fields = [
+        item.name,
+        item.kind,
+        item.source,
+        item.description,
+        *kind_search_terms(item.kind),
+        *item.raw_titles,
+    ]
+    return normalize_search_text(" ".join(field for field in fields if field))
+
+
+def search_matches_item(item: "MediaItem", query: str) -> bool:
+    needle = normalize_search_text(query)
+    if not needle:
+        return True
+    haystack = item_search_text(item)
+    compact_haystack = haystack.replace(" ", "")
+    for term in needle.split():
+        compact_term = term.replace(" ", "")
+        if term not in haystack and compact_term not in compact_haystack:
+            return False
+    return True
 
 
 def first_image_url(attrs: dict[str, str]) -> str:
@@ -1026,11 +1084,9 @@ def media_item_from_addon_meta(meta: dict[str, object], route: CatalogRoute) -> 
         url=url,
         source=route.provider,
         image=str(meta.get("poster") or meta.get("background") or ""),
+        description=clean_spaces(str(meta.get("description") or "")),
         raw_titles=[name],
     )
-    description = clean_spaces(str(meta.get("description") or ""))
-    if description and description not in item.raw_titles:
-        item.raw_titles.append(description)
     return item
 
 
@@ -1139,6 +1195,8 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
             continue
         if item.image and not current.image:
             current.image = item.image
+        if item.description and not current.description:
+            current.description = item.description
         current.raw_titles.extend(title for title in item.raw_titles if title not in current.raw_titles)
         current.discovered_episodes.update(item.discovered_episodes)
         if item.episode_count and (not current.episode_count or item.episode_count > current.episode_count):
@@ -1186,6 +1244,7 @@ def media_item_from_payload(payload: dict[str, object]) -> MediaItem:
         url=str(payload.get("url") or ""),
         source=str(payload.get("source") or ""),
         image=str(payload.get("image") or ""),
+        description=str(payload.get("description") or ""),
         episode_count=int(episode_count) if isinstance(episode_count, int) else None,
         playable=bool(payload.get("playable") or False),
         playable_checked=bool(payload.get("playable_checked") or False),
@@ -1201,7 +1260,7 @@ def catalog_cache_key(
     fetch_details: bool = False,
     playable_only: bool = False,
 ) -> tuple[str, int, str, bool, bool]:
-    return catalog_id, max(1, min(int(pages), 25)), clean_spaces(search), bool(fetch_details), bool(playable_only)
+    return catalog_id, max(1, min(int(pages), 25)), normalize_search_text(search), bool(fetch_details), bool(playable_only)
 
 
 def trim_catalog_cache(limit: int | None = None) -> None:
@@ -1310,7 +1369,7 @@ def scrape_single_catalog(
         raise ValueError(f"Unknown catalog id: {catalog_id}")
     pages = max(1, min(int(pages), 25))
     first_urls = route_urls(route)
-    scraped_items, errors, fetched_urls = addon_catalog_items(catalog_id, route, pages, search=search)
+    scraped_items, errors, fetched_urls = addon_catalog_items(catalog_id, route, pages)
     used_addon_catalog = bool(scraped_items)
     for page in range(1, pages + 1):
         if used_addon_catalog:
@@ -1336,9 +1395,8 @@ def scrape_single_catalog(
             errors.extend(page_errors)
         time.sleep(0.15)
     items = merge_items(scraped_items)
-    if search and not used_addon_catalog:
-        needle = search.casefold()
-        items = [item for item in items if needle in item.name.casefold() or any(needle in title.casefold() for title in item.raw_titles)]
+    if search:
+        items = [item for item in items if search_matches_item(item, search)]
     if fetch_details:
         for item in items:
             if item.kind != "series":

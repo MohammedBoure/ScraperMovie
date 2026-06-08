@@ -25,6 +25,7 @@ from arabcity_scraper import (
     media_item_from_addon_meta,
     manifest_catalog_ids,
     normalize_media_name,
+    search_matches_item,
     player_from_addon_stream,
     request_safe_url,
     scrape_catalog,
@@ -51,6 +52,32 @@ class ArabCityScraperTests(unittest.TestCase):
             normalize_media_name("مشاهدة مسلسل المدينة البعيدة الموسم الاول الحلقة 3 مترجمة", "series"),
             "المدينة البعيدة",
         )
+
+    def test_search_matches_arabic_without_diacritic_or_space_sensitivity(self):
+        item = MediaItem(
+            "المدينة البعيدة",
+            "series",
+            "https://akwam.example/series/far-city",
+            "akwam",
+            raw_titles=["مشاهدة مُسَلْسَل المدينة   البعيدة الحلقة 3 مترجمة"],
+        )
+        self.assertTrue(search_matches_item(item, "المدينه البعيده"))
+        self.assertTrue(search_matches_item(item, "المدينةالبعيدة"))
+
+    def test_search_matches_kind_source_raw_title_and_description(self):
+        item = MediaItem(
+            "From",
+            "series",
+            "https://akwam.example/series/from",
+            "akwam",
+            description="رعب وغموض في مدينة محاصرة",
+            raw_titles=["From الموسم الرابع"],
+        )
+        self.assertTrue(search_matches_item(item, "مسلسل"))
+        self.assertTrue(search_matches_item(item, "akwam"))
+        self.assertTrue(search_matches_item(item, "الموسم الرابع"))
+        self.assertTrue(search_matches_item(item, "رعب غموض"))
+        self.assertFalse(search_matches_item(item, "كوميديا"))
 
     def test_extract_items_groups_series_episodes(self):
         html = """
@@ -292,6 +319,7 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(item.url, "https://akwam.it/series/5597/from-4")
         self.assertEqual(item.kind, "series")
         self.assertEqual(item.image, "https://img.example.test/poster.jpg")
+        self.assertEqual(item.description, "جودة: WEB-DL")
 
     def test_available_catalogs_starts_with_complete_library(self):
         catalogs = available_catalogs()
@@ -383,6 +411,32 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(normal["count"], 2)
         self.assertEqual(playable["count"], 1)
         self.assertTrue(normal_again["cached"])
+
+    def test_scrape_catalog_filters_addon_items_with_normalized_search_fields(self):
+        items = [
+            MediaItem(
+                "From",
+                "series",
+                "https://akwam.example/series/from",
+                "akwam",
+                description="رعب وغموض داخل مدينة محاصرة",
+                raw_titles=["From الموسم الرابع"],
+            ),
+            MediaItem(
+                "Comedy Night",
+                "series",
+                "https://akwam.example/series/comedy-night",
+                "akwam",
+                description="كوميديا اجتماعية",
+                raw_titles=["Comedy Night"],
+            ),
+        ]
+        with patch("arabcity_scraper.addon_catalog_items", return_value=(items, [], ["https://example.test/catalog"])) as mocked:
+            result = scrape_catalog("akoam-series-all", search="رُعْب   غموض")
+
+        mocked.assert_called_once_with("akoam-series-all", CATALOG_ROUTES["akoam-series-all"], 1)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["items"][0]["name"], "From")
 
     def test_complete_library_scrapes_all_catalogs_and_merges_duplicates(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):

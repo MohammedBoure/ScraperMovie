@@ -1017,6 +1017,75 @@ def item_sources(source: str) -> list[str]:
     return sources or ["akwam"]
 
 
+def check_player_availability(
+    media_url: str = "",
+    kind: str = "mixed",
+    source: str = "akwam",
+    name: str = "",
+    stream_id: str = "",
+) -> dict[str, object]:
+    if not media_url and not stream_id:
+        raise ValueError("Missing media URL")
+    if media_url and not is_allowed_source_url(media_url):
+        raise ValueError("Unsupported media URL")
+    if media_url and is_video_url(media_url):
+        return {
+            "url": media_url,
+            "kind": kind,
+            "source": source,
+            "name": name,
+            "checked": True,
+            "status": "direct",
+            "playable": True,
+            "streams": 1,
+            "errors": [],
+        }
+
+    errors: list[str] = []
+    stream_count = 0
+
+    def count_stream_players(current_stream_id: str, item_type: str) -> int:
+        if not current_stream_id:
+            return 0
+        try:
+            return len(direct_video_players(player_from_addon_stream(current_stream_id, item_type=item_type)))
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            return 0
+
+    for source_name in item_sources(source):
+        item_type = addon_type_for_source(source_name)
+        if stream_id:
+            stream_count += count_stream_players(stream_id, item_type)
+        if not stream_id and kind in {"movie", "mixed"}:
+            movie_stream_id = build_addon_item_id(media_url, kind="movie", source=source_name, name=name)
+            stream_count += count_stream_players(movie_stream_id, item_type)
+        if stream_count:
+            break
+        if not stream_id and kind in {"series", "mixed"}:
+            episodes, episode_errors = cached_addon_episode_links(media_url, source=source_name, name=name)
+            errors.extend(episode_errors)
+            for episode in episodes:
+                stream_count += count_stream_players(episode.stream_id, item_type)
+                if stream_count:
+                    break
+        if stream_count:
+            break
+
+    status = "direct" if stream_count else "uncertain" if errors else "unavailable"
+    return {
+        "url": media_url,
+        "kind": kind,
+        "source": source,
+        "name": name,
+        "checked": True,
+        "status": status,
+        "playable": stream_count > 0,
+        "streams": stream_count,
+        "errors": errors,
+    }
+
+
 def playable_stream_count(item: MediaItem) -> int:
     for source in item_sources(item.source):
         item_type = addon_type_for_source(source)
@@ -1836,7 +1905,9 @@ INDEX_HTML = """<!doctype html>
       font-size: .82rem;
       font-weight: 800;
     }
-    .direct-chip { color: #99f6e4; border-color: rgba(22,184,166,.28); background: rgba(22,184,166,.08); }
+    .direct-chip.is-direct { color: #99f6e4; border-color: rgba(22,184,166,.28); background: rgba(22,184,166,.08); }
+    .direct-chip.is-uncertain { color: #fde68a; border-color: rgba(246,178,60,.34); background: rgba(246,178,60,.09); }
+    .direct-chip.is-unavailable { color: #fecdd3; border-color: rgba(251,113,133,.34); background: rgba(251,113,133,.09); }
     .episode-list { display: grid; gap: 7px; max-height: 210px; overflow: auto; padding-top: 2px; }
     .episode-link {
       display: flex;
@@ -2043,6 +2114,8 @@ INDEX_HTML = """<!doctype html>
     const RESULTS_PAGE_SIZE = 40;
     const episodeMetaCache = new Map();
     const episodeMetaRequests = new Map();
+    const playerCheckCache = new Map();
+    const playerCheckRequests = new Map();
 
     function refreshIcons() {
       if (window.lucide) window.lucide.createIcons();
@@ -2099,6 +2172,8 @@ INDEX_HTML = """<!doctype html>
     async function clearEpisodeCaches({ server = false } = {}) {
       episodeMetaCache.clear();
       episodeMetaRequests.clear();
+      playerCheckCache.clear();
+      playerCheckRequests.clear();
       if (server) {
         try {
           await fetch("/api/episode-cache/clear");
@@ -2191,6 +2266,7 @@ INDEX_HTML = """<!doctype html>
       }
       updateLoadMoreButton();
       refreshIcons();
+      prefetchPlayerChecks(visibleItems, batch);
       prefetchSeriesEpisodeMeta(visibleItems, batch);
       autoloadInitialEpisodeLists(visibleItems, batch);
     }
@@ -2201,16 +2277,42 @@ INDEX_HTML = """<!doctype html>
       return "قيد فحص الحلقات";
     }
 
+    function playerStatusFromItem(item) {
+      if (item.playable_checked && item.playable) return "direct";
+      if (item.playable_checked) return "unavailable";
+      return "uncertain";
+    }
+
+    function playerStatusLabel(status) {
+      if (status === "direct") return "مباشر";
+      if (status === "unavailable") return "غير متاح";
+      return "غير مؤكد";
+    }
+
+    function playerStatusIcon(status) {
+      if (status === "direct") return "badge-check";
+      if (status === "unavailable") return "circle-x";
+      return "circle-help";
+    }
+
+    function playerCheckKey(item) {
+      return `${item.url || ""}|${item.kind || "mixed"}|${item.source || "akwam"}|${item.name || ""}`;
+    }
+
+    function availabilityBadgeMarkup(item) {
+      const status = playerStatusFromItem(item);
+      return `<span class="direct-chip is-${status}" data-url="${escapeHtml(item.url)}" data-kind="${escapeHtml(item.kind)}" data-source="${escapeHtml(item.source)}" data-name="${escapeHtml(item.name)}"><i data-lucide="${playerStatusIcon(status)}"></i><span>${playerStatusLabel(status)}</span></span>`;
+    }
+
     function actionsMarkup(item) {
       const title = escapeHtml(item.name);
       const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>تشغيل داخل الصفحة</span></a>`;
-      const directText = item.playable_checked ? "تم التحقق من التشغيل" : "يتحقق عند التشغيل";
-      const directIcon = item.playable_checked ? "badge-check" : "monitor-play";
-      if (item.kind !== "series") return `<div class="actions">${watchLink}<span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span></div>`;
+      const availabilityBadge = availabilityBadgeMarkup(item);
+      if (item.kind !== "series") return `<div class="actions">${watchLink}${availabilityBadge}</div>`;
       return `
         <div class="actions">
           <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}" data-source="${escapeHtml(item.source)}" data-name="${escapeHtml(item.name)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
-          <span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span>
+          ${availabilityBadge}
           <div class="episode-list"></div>
         </div>
       `;
@@ -2226,6 +2328,69 @@ INDEX_HTML = """<!doctype html>
         element.dataset.source === item.source &&
         element.dataset.name === item.name
       );
+    }
+
+    function findPlayerChip(item) {
+      return Array.from(rows.querySelectorAll(".direct-chip")).find(element =>
+        element.dataset.url === item.url &&
+        element.dataset.kind === item.kind &&
+        element.dataset.source === item.source &&
+        element.dataset.name === item.name
+      );
+    }
+
+    function applyPlayerCheck(item, data, batch) {
+      if (batch !== renderBatch) return;
+      const chip = findPlayerChip(item);
+      if (!chip) return;
+      const status = data.status || "uncertain";
+      chip.className = `direct-chip is-${status}`;
+      chip.innerHTML = `<i data-lucide="${playerStatusIcon(status)}"></i><span>${playerStatusLabel(status)}</span>`;
+      refreshIcons();
+    }
+
+    async function checkPlayerStatus(item, batch) {
+      const key = playerCheckKey(item);
+      let data = playerCheckCache.get(key);
+      if (!data) {
+        let request = playerCheckRequests.get(key);
+        if (!request) {
+          request = (async () => {
+            const params = new URLSearchParams({
+              url: item.url,
+              kind: item.kind || "mixed",
+              source: item.source || "akwam",
+              name: item.name || "",
+            });
+            const response = await fetch(`/api/check-player?${params}`);
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || "تعذر فحص التشغيل");
+            playerCheckCache.set(key, payload);
+            return payload;
+          })().finally(() => playerCheckRequests.delete(key));
+          playerCheckRequests.set(key, request);
+        }
+        data = await request;
+      }
+      applyPlayerCheck(item, data, batch);
+      return data;
+    }
+
+    async function prefetchPlayerChecks(items, batch) {
+      const visibleItems = items.filter(item => item && item.url);
+      let index = 0;
+      const workerCount = Math.min(5, visibleItems.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (index < visibleItems.length && batch === renderBatch) {
+          const item = visibleItems[index++];
+          try {
+            await checkPlayerStatus(item, batch);
+          } catch (_error) {
+            applyPlayerCheck(item, { status: "uncertain" }, batch);
+          }
+        }
+      });
+      await Promise.all(workers);
     }
 
     function isDirectVideoUrl(url) {
@@ -2555,6 +2720,26 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             name = params.get("name", [""])[0]
             try:
                 self.send_json(scrape_episode_meta(media_url, source=source, name=name))
+            except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/check-player":
+            params = parse_qs(parsed.query)
+            media_url = params.get("url", [""])[0]
+            kind = params.get("kind", ["mixed"])[0]
+            source = params.get("source", ["akwam"])[0]
+            name = params.get("name", [""])[0]
+            stream_id = params.get("stream_id", [""])[0]
+            try:
+                self.send_json(
+                    check_player_availability(
+                        media_url,
+                        kind=kind,
+                        source=source,
+                        name=name,
+                        stream_id=stream_id,
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return

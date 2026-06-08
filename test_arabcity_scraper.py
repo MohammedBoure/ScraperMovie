@@ -11,6 +11,7 @@ from arabcity_scraper import (
     MediaItem,
     PlayerLink,
     available_catalogs,
+    check_player_availability,
     clear_catalog_cache,
     clear_episode_cache,
     clear_episode_caches,
@@ -272,6 +273,35 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["selected"]["kind"], "video")
         self.assertEqual(result["selected"]["url"], "https://cdn.example.test/media/episode-1.mp4")
 
+    def test_check_player_reports_direct_without_fetching_video(self):
+        with patch("arabcity_scraper.fetch_html") as mocked_fetch_html:
+            result = check_player_availability("https://cdn.example.test/media/episode-1.mp4", kind="movie")
+        mocked_fetch_html.assert_not_called()
+        self.assertEqual(result["status"], "direct")
+        self.assertTrue(result["playable"])
+        self.assertEqual(result["streams"], 1)
+
+    def test_check_player_reports_movie_stream_statuses(self):
+        with patch("arabcity_scraper.player_from_addon_stream", return_value=[PlayerLink("https://cdn.example.test/v.mp4", "video")]):
+            direct = check_player_availability("https://akwam.example/movie/ready", kind="movie", source="akwam", name="Ready")
+        with patch("arabcity_scraper.player_from_addon_stream", return_value=[]):
+            unavailable = check_player_availability("https://akwam.example/movie/dead", kind="movie", source="akwam", name="Dead")
+        with patch("arabcity_scraper.player_from_addon_stream", side_effect=RuntimeError("slow stream")):
+            uncertain = check_player_availability("https://akwam.example/movie/slow", kind="movie", source="akwam", name="Slow")
+
+        self.assertEqual(direct["status"], "direct")
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(uncertain["status"], "uncertain")
+        self.assertTrue(uncertain["errors"])
+
+    def test_check_player_reports_series_episode_stream(self):
+        episodes = [EpisodeLink("الحلقة 1", "https://akwam.example/watch/from-1", number=1, stream_id="stream-1")]
+        with patch("arabcity_scraper.addon_episode_links", return_value=episodes):
+            with patch("arabcity_scraper.player_from_addon_stream", return_value=[PlayerLink("https://cdn.example.test/from-1.m3u8", "video")]):
+                result = check_player_availability("https://akwam.example/series/from", kind="series", source="akwam", name="From")
+        self.assertEqual(result["status"], "direct")
+        self.assertEqual(result["streams"], 1)
+
     def test_filter_playable_items_keeps_verified_direct_streams(self):
         items = [
             MediaItem("Ready Movie", "movie", "https://akwam.example/movie/ready", "akwam"),
@@ -350,6 +380,13 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("لديها حلقات", INDEX_HTML)
         self.assertIn("جاهزة للتشغيل", INDEX_HTML)
         self.assertIn("stats.with_episodes", INDEX_HTML)
+
+    def test_index_uses_check_player_badges(self):
+        self.assertIn("/api/check-player", INDEX_HTML)
+        self.assertIn("playerCheckCache", INDEX_HTML)
+        self.assertIn("مباشر", INDEX_HTML)
+        self.assertIn("غير مؤكد", INDEX_HTML)
+        self.assertIn("غير متاح", INDEX_HTML)
 
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)

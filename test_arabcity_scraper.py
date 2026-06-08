@@ -150,6 +150,18 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(episodes[0].number, 2)
         self.assertTrue(episodes[0].to_dict()["playable_reference"])
 
+    def test_data_integrity_episode_order_excludes_fake_watch_links(self):
+        detail_html = """
+        <a href="/media/show-episode-3.mp4">Episode 3</a>
+        <a href="/watch/show-episode-8">الحلقة 8</a>
+        <a href="/media/show-episode-12.m3u8">الحلقة ١٢</a>
+        <a href="/media/show-episode-7.mp4">ح 7</a>
+        """
+        episodes = extract_episode_links(detail_html, "https://ak.sv/series/show")
+        self.assertEqual([episode.number for episode in episodes], [12, 7, 3])
+        self.assertNotIn(8, [episode.number for episode in episodes])
+        self.assertTrue(all(episode.to_dict()["playable_reference"] for episode in episodes))
+
     def test_scrape_episode_meta_counts_and_caches_addon_episodes(self):
         episodes = [
             EpisodeLink("الحلقة 2", "https://akwam.example/watch/from-2", number=2, stream_id="stream-2"),
@@ -302,6 +314,20 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["status"], "direct")
         self.assertEqual(result["streams"], 1)
 
+    def test_check_player_reports_series_meta_failures_as_uncertain(self):
+        with patch("arabcity_scraper.addon_episode_links", side_effect=RuntimeError("meta down")):
+            result = check_player_availability(
+                "https://akwam.example/series/meta-down",
+                kind="series",
+                source="akwam",
+                name="Meta Down",
+            )
+
+        self.assertTrue(result["checked"])
+        self.assertFalse(result["playable"])
+        self.assertEqual(result["status"], "uncertain")
+        self.assertTrue(any("meta down" in error for error in result["errors"]))
+
     def test_filter_playable_items_keeps_verified_direct_streams(self):
         items = [
             MediaItem("Ready Movie", "movie", "https://akwam.example/movie/ready", "akwam"),
@@ -327,6 +353,29 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertTrue(items[0].playable_checked)
         self.assertFalse(items[0].playable)
+
+    def test_filter_playable_items_marks_zero_and_failed_stream_checks_unplayable(self):
+        items = [
+            MediaItem("Ready Movie", "movie", "https://akwam.example/movie/ready", "akwam"),
+            MediaItem("Dead Movie", "movie", "https://akwam.example/movie/dead", "akwam"),
+            MediaItem("Slow Movie", "movie", "https://akwam.example/movie/slow", "akwam"),
+        ]
+
+        def fake_stream_count(item):
+            if item.name == "Ready Movie":
+                return 1
+            if item.name == "Slow Movie":
+                raise RuntimeError("timeout")
+            return 0
+
+        with patch("arabcity_scraper.playable_stream_count", side_effect=fake_stream_count):
+            result = filter_playable_items(items)
+
+        self.assertEqual({item.name for item in result}, {"Ready Movie"})
+        self.assertTrue(all(item.playable_checked for item in items))
+        self.assertTrue(items[0].playable)
+        self.assertFalse(items[1].playable)
+        self.assertFalse(items[2].playable)
 
     def test_stremio_url_encodes_full_id_segment(self):
         url = stremio_url(
@@ -683,6 +732,84 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["stats"]["with_episodes"], 0)
         self.assertEqual(result["stats"]["checked"], 1)
         self.assertEqual(result["stats"]["playable"], 1)
+
+    def test_data_integrity_complete_library_merges_deduplicates_and_keeps_best_metadata(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            self.assertEqual(pages, 1)
+            self.assertEqual(search, "")
+            self.assertFalse(fetch_details)
+            self.assertFalse(fallback_to_site)
+            if catalog_id == "akoam-series-all":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "From",
+                            "kind": "series",
+                            "url": "https://akwam.example/series/from",
+                            "source": "akwam",
+                            "image": "",
+                            "description": "",
+                            "episode_count": 3,
+                            "raw_titles": ["From"],
+                        }
+                    ],
+                }
+            if catalog_id == "akoam-series-29":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": ["soft warning"],
+                    "items": [
+                        {
+                            "name": "From",
+                            "kind": "series",
+                            "url": "https://akwam.example/series/from-season-4",
+                            "source": "akwam",
+                            "image": "https://img.example.test/from.jpg",
+                            "description": "رعب وغموض",
+                            "episode_count": 7,
+                            "raw_titles": ["From الموسم الرابع"],
+                        }
+                    ],
+                }
+            if catalog_id == "akoam-movies-all":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "From",
+                            "kind": "movie",
+                            "url": "https://akwam.example/movie/from",
+                            "source": "akwam",
+                            "image": "https://img.example.test/from-movie.jpg",
+                            "episode_count": None,
+                            "raw_titles": ["From Movie"],
+                        }
+                    ],
+                }
+            return {"urls": [f"https://example.test/{catalog_id}"], "errors": [], "items": []}
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
+            result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, source_filter="akwam")
+
+        called_catalogs = [call.args[0] for call in mocked.call_args_list]
+        self.assertTrue(called_catalogs)
+        self.assertTrue(all(CATALOG_ROUTES[catalog_id].provider == "akwam" for catalog_id in called_catalogs))
+        self.assertEqual(result["count"], 2)
+        by_kind = {item["kind"]: item for item in result["items"]}
+        self.assertEqual(by_kind["series"]["name"], "From")
+        self.assertEqual(by_kind["series"]["episode_count"], 7)
+        self.assertEqual(by_kind["series"]["image"], "https://img.example.test/from.jpg")
+        self.assertEqual(by_kind["series"]["description"], "رعب وغموض")
+        self.assertIn("From الموسم الرابع", by_kind["series"]["raw_titles"])
+        self.assertEqual(by_kind["movie"]["source"], "akwam")
+        self.assertEqual(result["stats"]["total"], 2)
+        self.assertEqual(result["stats"]["movies"], 1)
+        self.assertEqual(result["stats"]["series"], 1)
+        self.assertEqual(result["stats"]["with_episodes"], 1)
+        self.assertIn("soft warning", result["errors"])
 
 
 if __name__ == "__main__":

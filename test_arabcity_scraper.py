@@ -43,6 +43,15 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(items[0].name, "Ghost Lawyer")
         self.assertEqual(items[0].episode_count, 23)
 
+    def test_extract_image_from_matching_card_link(self):
+        html = """
+        <a href="/series/ghost-lawyer"><img src="/placeholder.png" data-src="/posters/ghost.jpg"></a>
+        <div>8.0 23 WEB-DL</div>
+        <a href="/series/ghost-lawyer">Ghost Lawyer</a>
+        """
+        items = extract_media_items(html, "https://example.test/", CATALOG_ROUTES["akoam-series-all"])
+        self.assertEqual(items[0].image, "https://example.test/posters/ghost.jpg")
+
     def test_count_episodes_from_detail_links(self):
         detail_html = """
         <a href="/e1">مسلسل المؤسس عثمان الحلقة 1 مترجمة</a>

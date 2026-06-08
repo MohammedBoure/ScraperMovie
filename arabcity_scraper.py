@@ -125,6 +125,7 @@ class MediaItem:
     kind: str
     url: str
     source: str
+    image: str = ""
     episode_count: int | None = None
     discovered_episodes: set[int] = field(default_factory=set)
     raw_titles: list[str] = field(default_factory=list)
@@ -135,6 +136,7 @@ class MediaItem:
             "kind": self.kind,
             "url": self.url,
             "source": self.source,
+            "image": self.image,
             "episode_count": self.episode_count,
             "raw_titles": self.raw_titles[:5],
         }
@@ -175,6 +177,7 @@ class Token:
     kind: str
     text: str
     href: str = ""
+    image: str = ""
 
 
 class TokenExtractor(HTMLParser):
@@ -183,12 +186,14 @@ class TokenExtractor(HTMLParser):
         self.tokens: list[Token] = []
         self._link_href: str | None = None
         self._link_text: list[str] = []
+        self._link_image = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_map = {key.lower(): value or "" for key, value in attrs}
         if tag.lower() == "a" and attrs_map.get("href"):
             self._link_href = attrs_map["href"]
             self._link_text = []
+            self._link_image = ""
             title = attrs_map.get("title") or attrs_map.get("aria-label")
             if title:
                 self._link_text.append(title)
@@ -196,6 +201,9 @@ class TokenExtractor(HTMLParser):
             alt = attrs_map.get("alt") or attrs_map.get("title")
             if alt:
                 self._link_text.append(alt)
+            image = first_image_url(attrs_map)
+            if image:
+                self._link_image = image
 
     def handle_data(self, data: str) -> None:
         text = clean_spaces(data)
@@ -208,13 +216,24 @@ class TokenExtractor(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "a" and self._link_href:
-            self.tokens.append(Token("link", clean_spaces(" ".join(self._link_text)), self._link_href))
+            self.tokens.append(Token("link", clean_spaces(" ".join(self._link_text)), self._link_href, self._link_image))
             self._link_href = None
             self._link_text = []
+            self._link_image = ""
 
 
 def clean_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def first_image_url(attrs: dict[str, str]) -> str:
+    for key in ("data-src", "data-original", "data-lazy-src", "data-image", "src"):
+        if attrs.get(key):
+            return clean_spaces(attrs[key])
+    srcset = attrs.get("srcset") or attrs.get("data-srcset")
+    if srcset:
+        return clean_spaces(srcset.split(",", 1)[0].strip().split(" ", 1)[0])
+    return ""
 
 
 def normalize_display_title(title: str) -> str:
@@ -358,10 +377,10 @@ def extract_tokens(document: str, base_url: str) -> list[Token]:
     tokens: list[Token] = []
     for token in parser.tokens:
         if token.kind == "link":
-            tokens.append(Token("link", clean_spaces(token.text), urljoin(base_url, token.href)))
+            tokens.append(Token("link", clean_spaces(token.text), urljoin(base_url, token.href), urljoin(base_url, token.image) if token.image else ""))
         else:
             tokens.append(Token("text", clean_spaces(token.text)))
-    return [token for token in tokens if token.text]
+    return [token for token in tokens if token.text or token.image]
 
 
 def nearby_episode_count(tokens: list[Token], index: int) -> int | None:
@@ -409,6 +428,7 @@ def route_accepts_link(route: CatalogRoute, title: str, url: str) -> bool:
 def extract_media_items(document: str, page_source_url: str, route: CatalogRoute) -> list[MediaItem]:
     items: dict[str, MediaItem] = {}
     tokens = extract_tokens(document, page_source_url)
+    images_by_href = {token.href: token.image for token in tokens if token.kind == "link" and token.href and token.image}
     for index, token in enumerate(tokens):
         if token.kind != "link":
             continue
@@ -426,9 +446,12 @@ def extract_media_items(document: str, page_source_url: str, route: CatalogRoute
         nearby_count = nearby_episode_count(tokens, index) if kind == "series" else None
         key = f"{kind}:{name.casefold()}"
         item = items.get(key)
+        image = token.image or images_by_href.get(token.href, "")
         if not item:
-            item = MediaItem(name=name, kind=kind, url=token.href, source=route.provider)
+            item = MediaItem(name=name, kind=kind, url=token.href, source=route.provider, image=image)
             items[key] = item
+        elif image and not item.image:
+            item.image = image
         if episode:
             item.discovered_episodes.add(episode)
         if nearby_count and (not item.episode_count or nearby_count > item.episode_count):
@@ -464,6 +487,8 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
         if not current:
             merged[key] = item
             continue
+        if item.image and not current.image:
+            current.image = item.image
         current.raw_titles.extend(title for title in item.raw_titles if title not in current.raw_titles)
         current.discovered_episodes.update(item.discovered_episodes)
         if item.episode_count and (not current.episode_count or item.episode_count > current.episode_count):
@@ -556,11 +581,13 @@ INDEX_HTML = """<!doctype html>
     th { background: #eef4f8; font-size: 13px; color: #344054; }
     tr:last-child td { border-bottom: 0; }
     a { color: #0f766e; text-decoration: none; }
+    .poster { width: 58px; height: 82px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); background: #e5e7eb; display: block; }
+    .poster-missing { width: 58px; height: 82px; border-radius: 6px; border: 1px solid var(--line); background: linear-gradient(135deg, #e5e7eb, #f8fafc); display: grid; place-items: center; color: #64748b; font-size: 11px; }
     .pill { display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 3px 9px; background: #e6f6f4; color: #0f766e; font-size: 12px; }
     .raw { color: var(--muted); font-size: 12px; margin-top: 4px; }
     @media (max-width: 760px) {
       form { grid-template-columns: 1fr; }
-      th:nth-child(4), td:nth-child(4) { display: none; }
+      th:nth-child(5), td:nth-child(5) { display: none; }
       table { font-size: 14px; }
     }
   </style>
@@ -591,6 +618,7 @@ INDEX_HTML = """<!doctype html>
     <table>
       <thead>
         <tr>
+          <th>الصورة</th>
           <th>الاسم</th>
           <th>النوع</th>
           <th>الحلقات</th>
@@ -628,6 +656,7 @@ INDEX_HTML = """<!doctype html>
         const tr = document.createElement("tr");
         const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : "";
         tr.innerHTML = `
+          <td>${posterMarkup(item)}</td>
           <td>${escapeHtml(item.name)}${raw}</td>
           <td><span class="pill">${item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط"}</span></td>
           <td>${item.kind === "series" ? (item.episode_count || "غير معروف") : "-"}</td>
@@ -636,6 +665,11 @@ INDEX_HTML = """<!doctype html>
         `;
         rows.appendChild(tr);
       }
+    }
+
+    function posterMarkup(item) {
+      if (!item.image) return `<div class="poster-missing">N/A</div>`;
+      return `<img class="poster" src="${escapeHtml(item.image)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'), { className: 'poster-missing', textContent: 'N/A' }))">`;
     }
 
     function escapeHtml(value) {

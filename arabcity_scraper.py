@@ -565,7 +565,10 @@ class ArabCityHandler(BaseHTTPRequestHandler):
 
 def serve(host: str, port: int) -> None:
     server = ThreadingHTTPServer((host, port), ArabCityHandler)
-    print(f"ArabCity Scraper running at http://{host}:{port}", flush=True)
+    try:
+        print(f"ArabCity Scraper running at http://{host}:{port}", flush=True)
+    except OSError:
+        pass
     server.serve_forever()
 
 

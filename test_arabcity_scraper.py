@@ -11,7 +11,8 @@ from arabcity_scraper import (
     MediaItem,
     PlayerLink,
     available_catalogs,
-    clear_episode_meta_cache,
+    clear_episode_cache,
+    clear_episode_caches,
     count_episodes_from_html,
     detect_episode_number,
     direct_video_players,
@@ -26,6 +27,7 @@ from arabcity_scraper import (
     player_from_addon_stream,
     request_safe_url,
     scrape_catalog,
+    scrape_episodes,
     scrape_episode_meta,
     scrape_player,
     stremio_url,
@@ -34,7 +36,7 @@ from arabcity_scraper import (
 
 class ArabCityScraperTests(unittest.TestCase):
     def setUp(self):
-        clear_episode_meta_cache()
+        clear_episode_caches()
 
     def test_detect_episode_number_arabic(self):
         self.assertEqual(detect_episode_number("مسلسل المدينة الحلقة 12 مترجمة"), 12)
@@ -144,6 +146,42 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["episodes"][0]["url"], "https://akwam.example/media/from-1.mp4")
         self.assertTrue(result["episodes"][0]["playable_reference"])
+
+    def test_scrape_episodes_caches_final_links_by_series_url(self):
+        detail_html = '<a href="/media/from-1.mp4">الحلقة 1</a>'
+        with patch("arabcity_scraper.addon_episode_links", return_value=[]):
+            with patch("arabcity_scraper.fetch_html", return_value=detail_html) as mocked_fetch_html:
+                first = scrape_episodes("https://akwam.example/series/from", source="akwam", name="From")
+                second = scrape_episodes("https://akwam.example/series/from", source="akwam", name="From")
+        self.assertEqual(mocked_fetch_html.call_count, 1)
+        self.assertEqual(first["episodes"], second["episodes"])
+        self.assertEqual(first["count"], 1)
+
+    def test_episode_cache_can_be_cleared(self):
+        detail_html = '<a href="/media/from-1.mp4">الحلقة 1</a>'
+        with patch("arabcity_scraper.addon_episode_links", return_value=[]):
+            with patch("arabcity_scraper.fetch_html", return_value=detail_html) as mocked_fetch_html:
+                scrape_episodes("https://akwam.example/series/from", source="akwam", name="From")
+                clear_episode_cache()
+                scrape_episodes("https://akwam.example/series/from", source="akwam", name="From")
+        self.assertEqual(mocked_fetch_html.call_count, 2)
+
+    def test_episode_cache_evicts_oldest_when_limited(self):
+        pages = {
+            "https://akwam.example/series/one": '<a href="/media/one-1.mp4">الحلقة 1</a>',
+            "https://akwam.example/series/two": '<a href="/media/two-1.mp4">الحلقة 1</a>',
+        }
+
+        def fake_fetch_html(url):
+            return pages[url]
+
+        with patch("arabcity_scraper.EPISODE_CACHE_LIMIT", 1):
+            with patch("arabcity_scraper.addon_episode_links", return_value=[]):
+                with patch("arabcity_scraper.fetch_html", side_effect=fake_fetch_html) as mocked_fetch_html:
+                    scrape_episodes("https://akwam.example/series/one", source="akwam", name="One")
+                    scrape_episodes("https://akwam.example/series/two", source="akwam", name="Two")
+                    scrape_episodes("https://akwam.example/series/one", source="akwam", name="One")
+        self.assertEqual(mocked_fetch_html.call_count, 3)
 
     def test_scrape_episode_meta_returns_uncertain_on_meta_error(self):
         with patch("arabcity_scraper.addon_episode_links", side_effect=TimeoutError("slow meta")):
@@ -266,6 +304,10 @@ class ArabCityScraperTests(unittest.TestCase):
     def test_index_blocks_unverified_episode_watch_buttons(self):
         self.assertIn("isDirectVideoUrl", INDEX_HTML)
         self.assertIn("لا توجد روابط مشاهدة مباشرة مؤكدة", INDEX_HTML)
+
+    def test_index_clears_episode_cache_on_catalog_change(self):
+        self.assertIn("clearEpisodeCaches({ server: true })", INDEX_HTML)
+        self.assertIn("/api/episode-cache/clear", INDEX_HTML)
 
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)

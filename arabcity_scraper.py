@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import html
 import ipaddress
 import json
@@ -37,8 +38,21 @@ DEFAULT_AKWAM_BASE_URLS = (
     "https://akwams.org",
 )
 QUALITY_WORDS = "WEB-DL|HDTV|BluRay|WebRip|BRRIP|DVDrip|DVDSCR|HD|HDTS|CAM|BDRIP|HDRIP|HC"
-EPISODE_META_CACHE: dict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = {}
+
+
+def env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+EPISODE_CACHE_LIMIT = env_int("ARABCITY_EPISODE_CACHE_SIZE", 128)
+EPISODE_META_CACHE: OrderedDict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_META_CACHE_LOCK = Lock()
+EPISODE_LINKS_CACHE: OrderedDict[str, tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
+EPISODE_LINKS_CACHE_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
 
@@ -833,15 +847,37 @@ def episode_meta_cache_key(media_url: str, source: str = "akwam", name: str = ""
     return media_url.rstrip("/"), source or "akwam", name.casefold()
 
 
-def clear_episode_meta_cache() -> None:
+def episode_links_cache_key(media_url: str) -> str:
+    return media_url.rstrip("/")
+
+
+def trim_episode_cache(cache: OrderedDict, limit: int | None = None) -> None:
+    limit = EPISODE_CACHE_LIMIT if limit is None else limit
+    while len(cache) > limit:
+        cache.popitem(last=False)
+
+
+def clear_episode_cache() -> None:
+    with EPISODE_LINKS_CACHE_LOCK:
+        EPISODE_LINKS_CACHE.clear()
+
+
+def clear_episode_caches() -> None:
     with EPISODE_META_CACHE_LOCK:
         EPISODE_META_CACHE.clear()
+    clear_episode_cache()
+
+
+def clear_episode_meta_cache() -> None:
+    clear_episode_caches()
 
 
 def cached_addon_episode_links(media_url: str, source: str = "akwam", name: str = "") -> tuple[list[EpisodeLink], list[str]]:
     key = episode_meta_cache_key(media_url, source, name)
     with EPISODE_META_CACHE_LOCK:
         cached = EPISODE_META_CACHE.get(key)
+        if cached is not None:
+            EPISODE_META_CACHE.move_to_end(key)
     if cached is not None:
         return cached
 
@@ -859,6 +895,33 @@ def cached_addon_episode_links(media_url: str, source: str = "akwam", name: str 
     result = (episodes, errors)
     with EPISODE_META_CACHE_LOCK:
         EPISODE_META_CACHE[key] = result
+        EPISODE_META_CACHE.move_to_end(key)
+        trim_episode_cache(EPISODE_META_CACHE)
+    return result
+
+
+def cached_episode_links(media_url: str, source: str = "akwam", name: str = "") -> tuple[list[EpisodeLink], list[str]]:
+    key = episode_links_cache_key(media_url)
+    with EPISODE_LINKS_CACHE_LOCK:
+        cached = EPISODE_LINKS_CACHE.get(key)
+        if cached is not None:
+            EPISODE_LINKS_CACHE.move_to_end(key)
+    if cached is not None:
+        return cached
+
+    errors: list[str] = []
+    episodes, meta_errors = cached_addon_episode_links(media_url, source=source, name=name)
+    errors.extend(meta_errors)
+    if not episodes:
+        document = fetch_html(media_url)
+        episodes = extract_episode_links(document, media_url)
+    episodes = [episode for episode in episodes if has_episode_playable_reference(episode)]
+
+    result = (episodes, errors)
+    with EPISODE_LINKS_CACHE_LOCK:
+        EPISODE_LINKS_CACHE[key] = result
+        EPISODE_LINKS_CACHE.move_to_end(key)
+        trim_episode_cache(EPISODE_LINKS_CACHE)
     return result
 
 
@@ -1052,13 +1115,7 @@ def scrape_episodes(media_url: str, source: str = "akwam", name: str = "") -> di
         raise ValueError("Missing media URL")
     if not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
-    errors: list[str] = []
-    episodes, meta_errors = cached_addon_episode_links(media_url, source=source, name=name)
-    errors.extend(meta_errors)
-    if not episodes:
-        document = fetch_html(media_url)
-        episodes = extract_episode_links(document, media_url)
-    episodes = [episode for episode in episodes if has_episode_playable_reference(episode)]
+    episodes, errors = cached_episode_links(media_url, source=source, name=name)
     return {
         "url": media_url,
         "count": len(episodes),
@@ -1868,6 +1925,16 @@ INDEX_HTML = """<!doctype html>
       await loadItems({ initial: true });
     }
 
+    async function clearEpisodeCaches({ server = false } = {}) {
+      episodeMetaCache.clear();
+      episodeMetaRequests.clear();
+      if (server) {
+        try {
+          await fetch("/api/episode-cache/clear");
+        } catch (_error) {}
+      }
+    }
+
     async function loadItems({ initial = false } = {}) {
       if (autoLoadController) autoLoadController.abort();
       autoLoadController = new AbortController();
@@ -2161,7 +2228,10 @@ INDEX_HTML = """<!doctype html>
       loadItems();
     });
 
-    catalog.addEventListener("change", () => loadItems());
+    catalog.addEventListener("change", async () => {
+      await clearEpisodeCaches({ server: true });
+      loadItems();
+    });
     document.querySelector("#pages").addEventListener("change", () => loadItems());
     document.querySelector("#details").addEventListener("change", () => loadItems());
     document.querySelector("#playableOnly").addEventListener("change", () => loadItems());
@@ -2270,6 +2340,10 @@ class ArabCityHandler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/episode-cache/clear":
+            clear_episode_caches()
+            self.send_json({"cleared": True})
             return
         if parsed.path == "/api/episodes":
             params = parse_qs(parsed.query)

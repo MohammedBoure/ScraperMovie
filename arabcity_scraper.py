@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -25,6 +25,7 @@ USER_AGENT = (
 
 AKWAM_BASE_URL = os.environ.get("AKWAM_BASE_URL", "https://akwam.cyou").rstrip("/")
 ALOOYTV_BASE_URL = os.environ.get("ALOOYTV_BASE_URL", "https://alooytv.co").rstrip("/")
+ARABCITY_ADDON_BASE_URL = os.environ.get("ARABCITY_ADDON_BASE_URL", "https://arabcity.fly.dev").rstrip("/")
 REQUEST_TIMEOUT = float(os.environ.get("ARABCITY_TIMEOUT", "20"))
 DEFAULT_AKWAM_BASE_URLS = (
     "https://tv.akwam.tv",
@@ -155,6 +156,7 @@ class EpisodeLink:
     url: str
     number: int | None = None
     image: str = ""
+    stream_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -162,6 +164,7 @@ class EpisodeLink:
             "url": self.url,
             "number": self.number,
             "image": self.image,
+            "stream_id": self.stream_id,
         }
 
 
@@ -372,6 +375,28 @@ def fetch_html(url: str) -> str:
         raise RuntimeError(f"HTTP {exc.code} while fetching {url}") from exc
     except URLError as exc:
         raise RuntimeError(f"Could not fetch {url}: {exc.reason}") from exc
+
+
+def fetch_json(url: str) -> dict[str, object]:
+    request = Request(
+        request_safe_url(url),
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json,text/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ar,en-US;q=0.8,en;q=0.6",
+        },
+    )
+    try:
+        with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+            raw = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            return json.loads(raw.decode(charset, errors="replace"))
+    except HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code} while fetching {url}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not fetch {url}: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON while fetching {url}") from exc
 
 
 def unique_values(values: Iterable[str]) -> list[str]:
@@ -669,17 +694,112 @@ def extract_player_links(document: str, page_source_url: str) -> list[PlayerLink
     return sorted(players.values(), key=lambda player: player_score(player, page_source_url), reverse=True)
 
 
-def scrape_player(media_url: str) -> dict[str, object]:
-    if not media_url:
+def addon_type_for_source(source: str = "akwam") -> str:
+    return "ArabCity-alooytv" if source == "alooytv" else "ArabCity-Akwam"
+
+
+def stremio_url(resource: str, item_type: str, item_id: str) -> str:
+    encoded_id = quote(item_id, safe="")
+    return f"{ARABCITY_ADDON_BASE_URL}/{resource}/{item_type}/{encoded_id}.json"
+
+
+def source_slug_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return tail or "item"
+
+
+def build_addon_item_id(media_url: str, kind: str = "series", source: str = "akwam", name: str = "") -> str:
+    slug = name or source_slug_from_url(media_url)
+    provider = "alooytv" if source == "alooytv" else "akoam"
+    addon_kind = "movie" if kind == "movie" else "series"
+    return f"arabcity:{provider}:{addon_kind}:{slug}:{quote(media_url, safe='')}"
+
+
+def addon_meta_for_media(media_url: str, kind: str = "series", source: str = "akwam", name: str = "") -> dict[str, object]:
+    item_type = addon_type_for_source(source)
+    item_id = build_addon_item_id(media_url, kind=kind, source=source, name=name)
+    return fetch_json(stremio_url("meta", item_type, item_id))
+
+
+def addon_episode_links(media_url: str, source: str = "akwam", name: str = "") -> list[EpisodeLink]:
+    payload = addon_meta_for_media(media_url, kind="series", source=source, name=name)
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        return []
+    videos = meta.get("videos")
+    if not isinstance(videos, list):
+        return []
+    episodes: list[EpisodeLink] = []
+    for video in videos:
+        if not isinstance(video, dict):
+            continue
+        stream_id = str(video.get("id") or "")
+        if not stream_id:
+            continue
+        title = clean_spaces(str(video.get("title") or ""))
+        number = video.get("episode")
+        episode_url = unquote(stream_id.rsplit(":", 1)[-1]) if ":" in stream_id else media_url
+        episodes.append(
+            EpisodeLink(
+                title=title or (f"Episode {number}" if number else "Watch"),
+                url=episode_url,
+                number=int(number) if isinstance(number, int) else detect_episode_number(title),
+                image=str(video.get("thumbnail") or ""),
+                stream_id=stream_id,
+            )
+        )
+    return sorted(
+        episodes,
+        key=lambda episode: (
+            episode.number is None,
+            -(episode.number or 0),
+            episode.title.casefold(),
+        ),
+    )
+
+
+def player_from_addon_stream(stream_id: str, item_type: str = "ArabCity-Akwam") -> list[PlayerLink]:
+    if not stream_id:
+        return []
+    payload = fetch_json(stremio_url("stream", item_type, stream_id))
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        return []
+    players: list[PlayerLink] = []
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        stream_url = str(stream.get("url") or stream.get("externalUrl") or "")
+        if not stream_url or not is_allowed_source_url(stream_url):
+            continue
+        title = clean_spaces(str(stream.get("title") or stream.get("name") or "ArabCity stream"))
+        players.append(PlayerLink(url=stream_url, kind="video" if is_video_url(stream_url) else "iframe", title=title))
+    return players
+
+
+def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
+    if not media_url and not stream_id:
         raise ValueError("Missing media URL")
-    if not is_allowed_source_url(media_url):
+    players: list[PlayerLink] = []
+    errors: list[str] = []
+    if stream_id:
+        try:
+            players = player_from_addon_stream(stream_id)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+    if not media_url:
+        media_url = players[0].url if players else ""
+    if media_url and not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
-    document = fetch_html(media_url)
-    players = extract_player_links(document, media_url)
+    if not players:
+        document = fetch_html(media_url)
+        players = extract_player_links(document, media_url)
     selected = players[0] if players else PlayerLink(url=media_url, kind="page", title="Episode page")
     return {
         "url": media_url,
         "selected": selected.to_dict(),
+        "errors": errors,
         "players": [player.to_dict() for player in players],
     }
 
@@ -689,11 +809,19 @@ def scrape_episodes(media_url: str) -> dict[str, object]:
         raise ValueError("Missing media URL")
     if not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
-    document = fetch_html(media_url)
-    episodes = extract_episode_links(document, media_url)
+    errors: list[str] = []
+    episodes: list[EpisodeLink] = []
+    try:
+        episodes = addon_episode_links(media_url)
+    except RuntimeError as exc:
+        errors.append(str(exc))
+    if not episodes:
+        document = fetch_html(media_url)
+        episodes = extract_episode_links(document, media_url)
     return {
         "url": media_url,
         "count": len(episodes),
+        "errors": errors,
         "episodes": [episode.to_dict() for episode in episodes],
     }
 
@@ -1010,7 +1138,7 @@ INDEX_HTML = """<!doctype html>
         } else {
           list.innerHTML = data.episodes.map(episode => {
             const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}">${escapeHtml(label)}</a>`;
+            return `<a class="episode-link episode-play" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}">${escapeHtml(label)}</a>`;
           }).join("");
         }
         button.dataset.loaded = "1";
@@ -1029,7 +1157,8 @@ INDEX_HTML = """<!doctype html>
       const title = link.dataset.title || link.textContent;
       setStatus("جاري استخراج رابط المشغل...");
       try {
-        const response = await fetch(`/api/player?url=${encodeURIComponent(link.href)}`);
+        const params = new URLSearchParams({ url: link.href, stream_id: link.dataset.streamId || "" });
+        const response = await fetch(`/api/player?${params}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "تعذر استخراج رابط المشغل");
         const selected = data.selected || { url: link.href, kind: "page" };
@@ -1079,8 +1208,9 @@ class ArabCityHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/player":
             params = parse_qs(parsed.query)
             media_url = params.get("url", [""])[0]
+            stream_id = params.get("stream_id", [""])[0]
             try:
-                self.send_json(scrape_player(media_url))
+                self.send_json(scrape_player(media_url, stream_id=stream_id))
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return

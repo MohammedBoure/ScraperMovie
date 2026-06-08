@@ -10,6 +10,7 @@ from arabcity_scraper import (
     is_allowed_source_url,
     normalize_media_name,
     request_safe_url,
+    stremio_url,
 )
 
 
@@ -95,6 +96,15 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(players[0].kind, "video")
         self.assertEqual(players[0].url, "https://cdn.example.test/media/episode-1.mp4")
         self.assertEqual(players[1].url, "https://tv.akwam.tv/embed/episode-1")
+
+    def test_stremio_url_encodes_full_id_segment(self):
+        url = stremio_url(
+            "stream",
+            "ArabCity-Akwam",
+            "arabcity:akoam:series:الشاهد:https%3A%2F%2Fakwam.it%2Fseries%2F1",
+        )
+        self.assertIn("arabcity%3Aakoam%3Aseries%3A", url)
+        self.assertIn("https%253A%252F%252Fakwam.it", url)
 
 
 if __name__ == "__main__":

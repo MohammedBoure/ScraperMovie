@@ -39,6 +39,7 @@ DEFAULT_AKWAM_BASE_URLS = (
 QUALITY_WORDS = "WEB-DL|HDTV|BluRay|WebRip|BRRIP|DVDrip|DVDSCR|HD|HDTS|CAM|BDRIP|HDRIP|HC"
 EPISODE_META_CACHE: dict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = {}
 EPISODE_META_CACHE_LOCK = Lock()
+EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
 
 MANIFEST = {
@@ -338,8 +339,19 @@ def normalize_display_title(title: str) -> str:
     return clean_spaces(title)
 
 
+def episode_number_from_value(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    text = clean_spaces(str(value or "")).translate(EPISODE_DIGIT_TRANSLATION)
+    match = re.search(r"\d+", text)
+    return int(match.group(0)) if match else None
+
+
 def detect_episode_number(title: str) -> int | None:
-    match = re.search(r"(?:الحلقة|حلقة|ح)\s*(\d+)", title, flags=re.IGNORECASE)
+    title = clean_spaces(title).translate(EPISODE_DIGIT_TRANSLATION)
+    match = re.search(r"(?:الحلقة|حلقة)\s*(\d+)", title, flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"(?:^|\s)ح\s*(\d+)(?=\s|$)", title, flags=re.IGNORECASE)
     if not match:
         match = re.search(r"\b(?:episode|ep)\s*(\d+)\b", title, flags=re.IGNORECASE)
     return int(match.group(1)) if match else None
@@ -369,6 +381,8 @@ def should_skip_title(title: str) -> bool:
     clean = normalize_display_title(title)
     if clean in NOISE_TITLES:
         return True
+    if detect_episode_number(clean) is not None:
+        return False
     if len(clean) < 4:
         return True
     if re.fullmatch(r"[\d. /]+", clean):
@@ -786,13 +800,13 @@ def addon_episode_links(media_url: str, source: str = "akwam", name: str = "") -
         if not stream_id:
             continue
         title = clean_spaces(str(video.get("title") or ""))
-        number = video.get("episode")
+        number = episode_number_from_value(video.get("episode")) or detect_episode_number(title)
         episode_url = unquote(stream_id.rsplit(":", 1)[-1]) if ":" in stream_id else media_url
         episodes.append(
             EpisodeLink(
                 title=title or (f"Episode {number}" if number else "Watch"),
                 url=episode_url,
-                number=int(number) if isinstance(number, int) else detect_episode_number(title),
+                number=number,
                 image=str(video.get("thumbnail") or ""),
                 stream_id=stream_id,
             )

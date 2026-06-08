@@ -39,6 +39,8 @@ class ArabCityScraperTests(unittest.TestCase):
     def test_detect_episode_number_arabic(self):
         self.assertEqual(detect_episode_number("مسلسل المدينة الحلقة 12 مترجمة"), 12)
         self.assertEqual(detect_episode_number("مسلسل المدينة ح 7"), 7)
+        self.assertEqual(detect_episode_number("Episode 3"), 3)
+        self.assertEqual(detect_episode_number("مسلسل المدينة الحلقة ١٢ مترجمة"), 12)
 
     def test_normalize_series_name(self):
         self.assertEqual(
@@ -96,6 +98,15 @@ class ArabCityScraperTests(unittest.TestCase):
         episodes = extract_episode_links(detail_html, "https://ak.sv/series/ghost-lawyer")
         self.assertEqual([episode.number for episode in episodes], [12, 3, 1])
         self.assertEqual(episodes[0].url, "https://ak.sv/watch/ghost-lawyer-12")
+
+    def test_extract_episode_links_orders_arabic_and_english_episode_numbers(self):
+        detail_html = """
+        <a href="/watch/show-episode-3">Episode 3</a>
+        <a href="/watch/show-episode-12">الحلقة 12</a>
+        <a href="/watch/show-episode-7">ح 7</a>
+        """
+        episodes = extract_episode_links(detail_html, "https://ak.sv/series/show")
+        self.assertEqual([episode.number for episode in episodes], [12, 7, 3])
 
     def test_scrape_episode_meta_counts_and_caches_addon_episodes(self):
         episodes = [

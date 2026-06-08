@@ -452,6 +452,14 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("workers:", INDEX_HTML)
         self.assertIn("data.performance.workers", INDEX_HTML)
 
+    def test_index_shows_detailed_complete_library_progress(self):
+        self.assertIn("/api/scrape/start", INDEX_HTML)
+        self.assertIn("/api/scrape/progress", INDEX_HTML)
+        self.assertIn("renderScrapeProgress", INDEX_HTML)
+        self.assertIn("completed_catalogs", INDEX_HTML)
+        self.assertIn("current_results", INDEX_HTML)
+        self.assertIn("اكتمل ${completed}/${total} كتالوجات", INDEX_HTML)
+
     def test_index_uses_check_player_badges(self):
         self.assertIn("/api/check-player", INDEX_HTML)
         self.assertIn("playerCheckCache", INDEX_HTML)
@@ -732,6 +740,46 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(result["performance"]["worker_cap"], 8)
         self.assertEqual(mocked_sleep.call_count, len(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID]) - 1)
         self.assertTrue(all(call.args == (0.01,) for call in mocked_sleep.call_args_list))
+
+    def test_complete_library_reports_incremental_progress(self):
+        events: list[dict[str, object]] = []
+
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            route = CATALOG_ROUTES[catalog_id]
+            return {
+                "urls": [f"https://example.test/{catalog_id}"],
+                "errors": ["soft warning"] if catalog_id == "alooytv-arabic" else [],
+                "items": [
+                    {
+                        "name": catalog_id,
+                        "kind": route.kind,
+                        "url": f"https://{route.provider}.example/{catalog_id}",
+                        "source": route.provider,
+                        "image": "",
+                        "episode_count": None,
+                        "raw_titles": [catalog_id],
+                    }
+                ],
+            }
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single):
+            with patch("arabcity_scraper.time.sleep"):
+                result = scrape_catalog(
+                    COMPLETE_LIBRARY_CATALOG_ID,
+                    source_filter="alooytv",
+                    workers=1,
+                    progress_callback=events.append,
+                )
+
+        total = sum(1 for catalog_id in CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID] if CATALOG_ROUTES[catalog_id].provider == "alooytv")
+        self.assertTrue(events)
+        self.assertEqual(events[0]["completed_catalogs"], 0)
+        self.assertEqual(events[0]["total_catalogs"], total)
+        self.assertEqual(events[-1]["stage"], "done")
+        self.assertEqual(events[-1]["completed_catalogs"], total)
+        self.assertEqual(events[-1]["current_results"], result["count"])
+        self.assertEqual(events[-1]["errors"], 1)
+        self.assertIn(1, [event["completed_catalogs"] for event in events])
 
     def test_scrape_catalog_cache_separates_worker_count(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):

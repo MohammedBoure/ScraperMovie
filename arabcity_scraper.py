@@ -10,12 +10,13 @@ import os
 import re
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Lock
-from typing import Iterable
+from threading import Lock, Thread
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -61,6 +62,7 @@ def env_float(name: str, default: float, minimum: float = 0.0, maximum: float | 
 WORKER_HARD_CAP = 8
 DEFAULT_WORKERS = 6
 SOURCE_SUBMIT_DELAY = 0.03
+SCRAPE_JOB_LIMIT = 16
 EPISODE_CACHE_LIMIT = env_int("ARABCITY_EPISODE_CACHE_SIZE", 128)
 CATALOG_CACHE_LIMIT = env_int("ARABCITY_CATALOG_CACHE_SIZE", 32)
 EPISODE_META_CACHE: OrderedDict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
@@ -69,6 +71,8 @@ EPISODE_LINKS_CACHE: OrderedDict[str, tuple[list["EpisodeLink"], list[str]]] = O
 EPISODE_LINKS_CACHE_LOCK = Lock()
 CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool, str, int], dict[str, object]] = OrderedDict()
 CATALOG_CACHE_LOCK = Lock()
+SCRAPE_JOBS: OrderedDict[str, dict[str, object]] = OrderedDict()
+SCRAPE_JOBS_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 ARABIC_SEARCH_TRANSLATION = str.maketrans(
     {
@@ -212,6 +216,55 @@ def performance_info(worker_count: int, requested_workers: int, task_count: int 
         "source_delay_ms": int(source_submit_delay() * 1000),
         "tasks": task_count,
     }
+
+
+def catalog_task_count(catalog_id: str, source_filter: str = "all") -> int:
+    if catalog_id not in CATALOG_GROUPS:
+        return 1
+    source_filter = normalize_source_filter(source_filter)
+    return sum(1 for child_id in CATALOG_GROUPS[catalog_id] if catalog_matches_source_filter(child_id, source_filter))
+
+
+def initial_scrape_progress(catalog_id: str, source_filter: str = "all") -> dict[str, object]:
+    return {
+        "status": "running",
+        "stage": "queued",
+        "catalog": catalog_id,
+        "completed_catalogs": 0,
+        "total_catalogs": catalog_task_count(catalog_id, source_filter),
+        "current_results": 0,
+        "errors": 0,
+        "message": "تم وضع الاستخراج في قائمة التنفيذ.",
+    }
+
+
+def trim_scrape_jobs() -> None:
+    while len(SCRAPE_JOBS) > SCRAPE_JOB_LIMIT:
+        SCRAPE_JOBS.popitem(last=False)
+
+
+def scrape_job_snapshot(job_id: str) -> dict[str, object] | None:
+    with SCRAPE_JOBS_LOCK:
+        job = SCRAPE_JOBS.get(job_id)
+        if job is not None:
+            SCRAPE_JOBS.move_to_end(job_id)
+            return deepcopy(job)
+    return None
+
+
+def update_scrape_job(job_id: str, **updates: object) -> None:
+    with SCRAPE_JOBS_LOCK:
+        job = SCRAPE_JOBS.get(job_id)
+        if not job:
+            return
+        progress = updates.pop("progress", None)
+        if isinstance(progress, dict):
+            current_progress = job.setdefault("progress", {})
+            if isinstance(current_progress, dict):
+                current_progress.update(progress)
+        job.update(updates)
+        job["updated_at"] = time.time()
+        SCRAPE_JOBS.move_to_end(job_id)
 
 
 NOISE_TITLES = {
@@ -1437,6 +1490,7 @@ def scrape_catalog_group(
     playable_only: bool = False,
     source_filter: str = "all",
     workers: object | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     child_catalogs = CATALOG_GROUPS.get(catalog_id)
     if not child_catalogs:
@@ -1447,9 +1501,39 @@ def scrape_catalog_group(
     errors: list[str] = []
     fetched_urls: list[str] = []
     items: list[MediaItem] = []
+    completed_catalogs = 0
+
+    def emit_progress(stage: str = "extracting") -> None:
+        if not progress_callback:
+            return
+        current_items = merge_items(item for item in items if item.name and item.url)
+        progress_callback(
+            {
+                "status": "running",
+                "stage": stage,
+                "catalog": catalog_id,
+                "completed_catalogs": completed_catalogs,
+                "total_catalogs": len(child_catalogs),
+                "current_results": len(current_items),
+                "errors": len(errors),
+            }
+        )
+
     if not child_catalogs:
         requested_workers = worker_request_value(workers)
         worker_count = bounded_worker_count(workers)
+        if progress_callback:
+            progress_callback(
+                {
+                    "status": "complete",
+                    "stage": "done",
+                    "catalog": catalog_id,
+                    "completed_catalogs": 0,
+                    "total_catalogs": 0,
+                    "current_results": 0,
+                    "errors": 0,
+                }
+            )
         return {
             "catalog": catalog_id,
             "catalog_name": "المكتبة الكاملة",
@@ -1466,6 +1550,7 @@ def scrape_catalog_group(
     requested_workers = worker_request_value(workers)
     worker_count = min(len(child_catalogs), bounded_worker_count(workers))
     submit_delay = source_submit_delay()
+    emit_progress()
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {}
         for index, child_id in enumerate(child_catalogs):
@@ -1487,16 +1572,33 @@ def scrape_catalog_group(
                 result = future.result()
             except Exception as exc:  # noqa: BLE001 - one catalog should not hide the rest of the library.
                 errors.append(f"{child_id}: {exc}")
+                completed_catalogs += 1
+                emit_progress()
                 continue
             errors.extend(str(error) for error in result.get("errors", []))
             fetched_urls.extend(str(url) for url in result.get("urls", []))
             payload_items = result.get("items", [])
             if isinstance(payload_items, list):
                 items.extend(media_item_from_payload(item) for item in payload_items if isinstance(item, dict))
+            completed_catalogs += 1
+            emit_progress()
     merged_items = merge_items(item for item in items if item.name and item.url)
     if playable_only:
+        emit_progress("checking")
         merged_items = filter_playable_items(merged_items, workers=workers)
     merged_items.sort(key=lambda item: (item.kind != "series", item.name, item.source))
+    if progress_callback:
+        progress_callback(
+            {
+                "status": "complete",
+                "stage": "done",
+                "catalog": catalog_id,
+                "completed_catalogs": completed_catalogs,
+                "total_catalogs": len(child_catalogs),
+                "current_results": len(merged_items),
+                "errors": len(errors),
+            }
+        )
     return {
         "catalog": catalog_id,
         "catalog_name": "المكتبة الكاملة",
@@ -1591,6 +1693,7 @@ def scrape_catalog(
     playable_only: bool = False,
     source_filter: str = "all",
     workers: object | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     key = catalog_cache_key(
         catalog_id,
@@ -1615,6 +1718,7 @@ def scrape_catalog(
             playable_only=playable_only,
             source_filter=source_filter,
             workers=workers,
+            progress_callback=progress_callback,
         )
     else:
         route = CATALOG_ROUTES.get(catalog_id)
@@ -1643,6 +1747,80 @@ def scrape_catalog(
             result["source_filter"] = source_filter
             result["performance"] = performance_info(worker_count, worker_request_value(workers), task_count=1)
     return store_catalog_result(key, result)
+
+
+def start_scrape_job(
+    catalog_id: str,
+    pages: int = 1,
+    search: str = "",
+    fetch_details: bool = False,
+    playable_only: bool = False,
+    source_filter: str = "all",
+    workers: object | None = None,
+) -> dict[str, object]:
+    job_id = uuid.uuid4().hex
+    progress = initial_scrape_progress(catalog_id, source_filter)
+    job = {
+        "id": job_id,
+        "done": False,
+        "error": "",
+        "result": None,
+        "progress": progress,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with SCRAPE_JOBS_LOCK:
+        SCRAPE_JOBS[job_id] = job
+        SCRAPE_JOBS.move_to_end(job_id)
+        trim_scrape_jobs()
+
+    def on_progress(update: dict[str, object]) -> None:
+        update_scrape_job(job_id, progress=update)
+
+    def run_job() -> None:
+        try:
+            result = scrape_catalog(
+                catalog_id,
+                pages=pages,
+                search=search,
+                fetch_details=fetch_details,
+                playable_only=playable_only,
+                source_filter=source_filter,
+                workers=workers,
+                progress_callback=on_progress,
+            )
+            final_progress = {
+                "status": "complete",
+                "stage": "done",
+                "completed_catalogs": catalog_task_count(catalog_id, source_filter),
+                "total_catalogs": catalog_task_count(catalog_id, source_filter),
+                "current_results": int(result.get("count") or 0),
+                "errors": len(result.get("errors", [])) if isinstance(result.get("errors"), list) else 0,
+            }
+            update_scrape_job(job_id, done=True, result=result, progress=final_progress)
+        except Exception as exc:  # noqa: BLE001 - background job must expose a readable API error.
+            update_scrape_job(
+                job_id,
+                done=True,
+                error=str(exc),
+                progress={"status": "error", "stage": "failed", "message": str(exc)},
+            )
+
+    Thread(target=run_job, daemon=True).start()
+    snapshot = scrape_job_snapshot(job_id)
+    return snapshot if snapshot is not None else job
+
+
+def scrape_args_from_query(params: dict[str, list[str]]) -> dict[str, object]:
+    return {
+        "catalog_id": params.get("catalog", [COMPLETE_LIBRARY_CATALOG_ID])[0],
+        "pages": int(params.get("pages", ["1"])[0] or "1"),
+        "search": params.get("search", [""])[0],
+        "fetch_details": params.get("details", ["0"])[0] in {"1", "true", "yes"},
+        "playable_only": params.get("playable_only", ["0"])[0] in {"1", "true", "yes"},
+        "source_filter": params.get("source_filter", ["all"])[0],
+        "workers": params.get("workers", [""])[0],
+    }
 
 
 INDEX_HTML = """<!doctype html>
@@ -2272,6 +2450,7 @@ INDEX_HTML = """<!doctype html>
     let visibleItemCount = 0;
     let activeResultTab = "all";
     let currentPlayerContext = {};
+    const COMPLETE_LIBRARY_CATALOG_ID = "arabcity-complete-library";
     const RESULTS_PAGE_SIZE = 40;
     const HLS_NETWORK_RETRY_LIMIT = 3;
     const episodeMetaCache = new Map();
@@ -2317,6 +2496,65 @@ INDEX_HTML = """<!doctype html>
       `).join("");
     }
 
+    function abortableDelay(ms, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, ms);
+        if (!signal) return;
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          const error = new Error("Aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    }
+
+    function renderScrapeProgress(progress = {}) {
+      const completed = progress.completed_catalogs || 0;
+      const total = progress.total_catalogs || 0;
+      const current = progress.current_results || 0;
+      const errors = progress.errors || 0;
+      const stage = progress.stage === "checking" ? "فحص التشغيل المباشر" : "استخراج المكتبة الكاملة";
+      renderStats({ total: current });
+      setStatus(`${stage}: اكتمل ${completed}/${total} كتالوجات، ${current} نتيجة حالية، ${errors} أخطاء.`);
+    }
+
+    async function fetchScrapeWithProgress(params, signal) {
+      const startResponse = await fetch(`/api/scrape/start?${params}`, { signal });
+      const startData = await startResponse.json();
+      if (!startResponse.ok) throw new Error(startData.error || "تعذر بدء استخراج المكتبة");
+      if (startData.progress) renderScrapeProgress(startData.progress);
+      const jobId = startData.id;
+      if (!jobId) throw new Error("تعذر تتبع تقدم الاستخراج");
+      while (true) {
+        if (startData.done) {
+          if (startData.error) throw new Error(startData.error);
+          return startData.result;
+        }
+        await abortableDelay(650, signal);
+        const progressResponse = await fetch(`/api/scrape/progress?id=${encodeURIComponent(jobId)}`, { signal });
+        const progressData = await progressResponse.json();
+        if (!progressResponse.ok) throw new Error(progressData.error || "تعذر قراءة تقدم الاستخراج");
+        if (progressData.progress) renderScrapeProgress(progressData.progress);
+        if (progressData.done) {
+          if (progressData.error) throw new Error(progressData.error);
+          return progressData.result;
+        }
+      }
+    }
+
+    function renderScrapeResult(data) {
+      renderStats(data.stats || { total: data.count || 0 });
+      renderItems(data.items);
+      const errors = Array.isArray(data.errors) ? data.errors : [];
+      const suffix = errors.length ? ` مع ${errors.length} أخطاء` : "";
+      const stats = data.stats || {};
+      const detail = `(${stats.movies || 0} فيلم، ${stats.series || 0} مسلسل)`;
+      const prefix = data.playable_only ? "جاهز للتشغيل فقط" : "المكتبة جاهزة";
+      const performance = data.performance && data.performance.workers ? `، توازي ${data.performance.workers}` : "";
+      setStatus(`${prefix}: ${data.count} نتيجة ${detail} من ${data.catalog_name}${performance}${suffix}.`);
+    }
+
     async function loadCatalogs() {
       const response = await fetch("/api/catalogs");
       const data = await response.json();
@@ -2360,17 +2598,15 @@ INDEX_HTML = """<!doctype html>
         playable_only: playableOnly ? "1" : "0",
       });
       try {
-        const response = await fetch(`/api/scrape?${params}`, { signal: autoLoadController.signal });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "تعذر تحميل المكتبة");
-        renderStats(data.stats || { total: data.count || 0 });
-        renderItems(data.items);
-        const suffix = data.errors.length ? ` مع ${data.errors.length} أخطاء` : "";
-        const stats = data.stats || {};
-        const detail = `(${stats.movies || 0} فيلم، ${stats.series || 0} مسلسل)`;
-        const prefix = data.playable_only ? "جاهز للتشغيل فقط" : "المكتبة جاهزة";
-        const performance = data.performance && data.performance.workers ? `، توازي ${data.performance.workers}` : "";
-        setStatus(`${prefix}: ${data.count} نتيجة ${detail} من ${data.catalog_name}${performance}${suffix}.`);
+        let data;
+        if (catalog.value === COMPLETE_LIBRARY_CATALOG_ID) {
+          data = await fetchScrapeWithProgress(params, autoLoadController.signal);
+        } else {
+          const response = await fetch(`/api/scrape?${params}`, { signal: autoLoadController.signal });
+          data = await response.json();
+          if (!response.ok) throw new Error(data.error || "تعذر تحميل المكتبة");
+        }
+        renderScrapeResult(data);
       } catch (error) {
         if (error.name === "AbortError") return;
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="wifi-off"></i><h3>تعذر تجهيز المكتبة</h3><p>${escapeHtml(error.message)}</p></div></div>`;
@@ -2995,27 +3231,26 @@ class ArabCityHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/catalogs":
             self.send_json({"manifest": MANIFEST, "catalogs": available_catalogs()})
             return
+        if parsed.path == "/api/scrape/start":
+            params = parse_qs(parsed.query)
+            try:
+                self.send_json(start_scrape_job(**scrape_args_from_query(params)))
+            except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/scrape/progress":
+            params = parse_qs(parsed.query)
+            job_id = params.get("id", [""])[0]
+            snapshot = scrape_job_snapshot(job_id)
+            if snapshot is None:
+                self.send_json({"error": "Scrape job not found"}, status=404)
+            else:
+                self.send_json(snapshot)
+            return
         if parsed.path == "/api/scrape":
             params = parse_qs(parsed.query)
-            catalog = params.get("catalog", [COMPLETE_LIBRARY_CATALOG_ID])[0]
-            pages = int(params.get("pages", ["1"])[0] or "1")
-            search = params.get("search", [""])[0]
-            details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
-            playable_only = params.get("playable_only", ["0"])[0] in {"1", "true", "yes"}
-            source_filter = params.get("source_filter", ["all"])[0]
-            workers = params.get("workers", [""])[0]
             try:
-                self.send_json(
-                    scrape_catalog(
-                        catalog,
-                        pages=pages,
-                        search=search,
-                        fetch_details=details,
-                        playable_only=playable_only,
-                        source_filter=source_filter,
-                        workers=workers,
-                    )
-                )
+                self.send_json(scrape_catalog(**scrape_args_from_query(params)))
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return

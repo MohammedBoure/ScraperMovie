@@ -388,6 +388,15 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("غير مؤكد", INDEX_HTML)
         self.assertIn("غير متاح", INDEX_HTML)
 
+    def test_index_player_shows_context_and_inline_failures(self):
+        self.assertIn('id="playerMeta"', INDEX_HTML)
+        self.assertIn("playerContextFromLink", INDEX_HTML)
+        self.assertIn("data-work-title", INDEX_HTML)
+        self.assertIn("data-episode-number", INDEX_HTML)
+        self.assertIn("جاري تحميل الفيديو", INDEX_HTML)
+        self.assertIn("فشل تشغيل الرابط داخل الصفحة", INDEX_HTML)
+        self.assertNotIn("window.open", INDEX_HTML)
+
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)
         self.assertEqual(manifest_catalog_ids(), expected)

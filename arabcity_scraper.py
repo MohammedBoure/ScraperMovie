@@ -1969,7 +1969,10 @@ INDEX_HTML = """<!doctype html>
       backdrop-filter: blur(18px);
     }
     .player-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; color: white; border-bottom: 1px solid var(--line); }
+    .player-heading { min-width: 0; display: grid; gap: 6px; }
     .player-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
+    .player-meta { display: flex; flex-wrap: wrap; gap: 6px; color: var(--muted); font-size: .76rem; font-weight: 800; }
+    .player-meta span { min-height: 24px; display: inline-flex; align-items: center; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.045); }
     .player-controls { display: flex; gap: 8px; flex: 0 0 auto; }
     .player-controls button { min-height: 36px; background: rgba(255,255,255,.075); border: 1px solid var(--line); box-shadow: none; }
     .player-controls button:hover { background: var(--accent); }
@@ -2078,7 +2081,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <section id="playerPanel" class="player-panel" aria-live="polite">
           <div class="player-bar">
-            <div id="playerTitle" class="player-title">المشغل المباشر</div>
+            <div class="player-heading">
+              <div id="playerTitle" class="player-title">المشغل المباشر</div>
+              <div id="playerMeta" class="player-meta" aria-live="polite"></div>
+            </div>
             <div class="player-controls">
               <button id="playerClose" type="button"><i data-lucide="x"></i><span>إغلاق</span></button>
             </div>
@@ -2104,6 +2110,7 @@ INDEX_HTML = """<!doctype html>
     const episodeVideo = document.querySelector("#episodeVideo");
     const playerState = document.querySelector("#playerState");
     const playerTitle = document.querySelector("#playerTitle");
+    const playerMeta = document.querySelector("#playerMeta");
     const playerClose = document.querySelector("#playerClose");
     let autoLoadController = null;
     let hlsInstance = null;
@@ -2111,6 +2118,7 @@ INDEX_HTML = """<!doctype html>
     let renderBatch = 0;
     let extractedItems = [];
     let visibleItemCount = 0;
+    let currentPlayerContext = {};
     const RESULTS_PAGE_SIZE = 40;
     const episodeMetaCache = new Map();
     const episodeMetaRequests = new Map();
@@ -2306,7 +2314,7 @@ INDEX_HTML = """<!doctype html>
 
     function actionsMarkup(item) {
       const title = escapeHtml(item.name);
-      const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}"><i data-lucide="play"></i><span>تشغيل داخل الصفحة</span></a>`;
+      const watchLink = `<a class="watch-now episode-play" href="${escapeHtml(item.url)}" data-title="${title}" data-work-title="${title}" data-source="${escapeHtml(item.source)}" data-kind="${escapeHtml(item.kind)}"><i data-lucide="play"></i><span>تشغيل داخل الصفحة</span></a>`;
       const availabilityBadge = availabilityBadgeMarkup(item);
       if (item.kind !== "series") return `<div class="actions">${watchLink}${availabilityBadge}</div>`;
       return `
@@ -2401,7 +2409,7 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    function episodeLinksMarkup(episodes) {
+    function episodeLinksMarkup(episodes, context = {}) {
       const playableEpisodes = (episodes || []).filter(episode => episode.stream_id || isDirectVideoUrl(episode.url));
       if (!playableEpisodes.length) {
         return `<span class="inline-error">لا توجد روابط مشاهدة مباشرة مؤكدة لهذه الحلقات.</span>`;
@@ -2410,7 +2418,7 @@ INDEX_HTML = """<!doctype html>
         const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
         const directClass = episode.stream_id || isDirectVideoUrl(episode.url) ? " is-direct" : "";
         const directLabel = episode.stream_id ? "مباشر" : "فيديو مباشر";
-        return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
+        return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-work-title="${escapeHtml(context.name || "")}" data-source="${escapeHtml(context.source || "")}" data-kind="series" data-episode-number="${escapeHtml(episode.number || "")}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
       }).join("");
     }
 
@@ -2459,7 +2467,7 @@ INDEX_HTML = """<!doctype html>
       if (!button) return;
       const list = button.closest(".actions").querySelector(".episode-list");
       if (!list) return;
-      list.innerHTML = episodeLinksMarkup(data.episodes || []);
+      list.innerHTML = episodeLinksMarkup(data.episodes || [], item);
       list.hidden = true;
       button.dataset.loaded = "1";
       button.dataset.autoloaded = "1";
@@ -2522,9 +2530,39 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    function showPlayerState(title, message, isError = false) {
+    function playerContextFromLink(link) {
+      return {
+        title: link.dataset.title || link.textContent || "",
+        workTitle: link.dataset.workTitle || link.dataset.title || link.textContent || "",
+        episodeNumber: link.dataset.episodeNumber || "",
+        source: link.dataset.source || "",
+        kind: link.dataset.kind || "",
+      };
+    }
+
+    function updatePlayerMeta(context = currentPlayerContext, loadingState = "", replaceContext = false) {
+      currentPlayerContext = replaceContext ? { ...context } : { ...currentPlayerContext, ...context };
+      const chips = [];
+      if (currentPlayerContext.workTitle) chips.push(["العمل", currentPlayerContext.workTitle]);
+      if (currentPlayerContext.episodeNumber) chips.push(["الحلقة", currentPlayerContext.episodeNumber]);
+      if (currentPlayerContext.source) chips.push(["المصدر", currentPlayerContext.source]);
+      if (loadingState) chips.push(["الحالة", loadingState]);
+      playerMeta.innerHTML = chips.map(([label, value]) => `<span>${escapeHtml(label)}: ${escapeHtml(value)}</span>`).join("");
+    }
+
+    function playbackFailureMessage(reason) {
+      const detail = cleanClientText(reason || "");
+      return detail ? `فشل تشغيل الرابط داخل الصفحة: ${detail}` : "فشل تشغيل الرابط داخل الصفحة بدون فتح أي موقع خارجي.";
+    }
+
+    function cleanClientText(value) {
+      return String(value || "").replace(/\\s+/g, " ").trim();
+    }
+
+    function showPlayerState(title, message, isError = false, context = currentPlayerContext, loadingState = isError ? "فشل التشغيل" : "بانتظار الاختيار", replaceContext = false) {
       destroyHls();
       playerTitle.textContent = title || "المشغل المباشر";
+      updatePlayerMeta(context, loadingState, replaceContext);
       episodeVideo.pause();
       episodeVideo.removeAttribute("src");
       episodeVideo.load();
@@ -2539,9 +2577,10 @@ INDEX_HTML = """<!doctype html>
       return new URL(url, window.location.href).pathname.toLowerCase().includes(".m3u8");
     }
 
-    function openPlayer(url, title) {
+    function openPlayer(url, title, context = {}) {
       destroyHls();
       playerTitle.textContent = title || "المشغل المباشر";
+      updatePlayerMeta(context, "جاري تحميل الفيديو", true);
       playerState.hidden = true;
       episodeVideo.hidden = false;
       episodeVideo.pause();
@@ -2553,8 +2592,9 @@ INDEX_HTML = """<!doctype html>
         hlsInstance.attachMedia(episodeVideo);
         hlsInstance.on(window.Hls.Events.ERROR, (_event, data) => {
           if (data && data.fatal) {
-            showPlayerState(title, "تعذر تشغيل رابط الفيديو المباشر داخل المتصفح.", true);
-            setStatus("تعذر تشغيل رابط الفيديو المباشر.", true);
+            const reason = data.details || data.type || "تعذر تشغيل رابط HLS.";
+            showPlayerState(title, playbackFailureMessage(reason), true, context);
+            setStatus(playbackFailureMessage(reason), true);
           }
         });
       } else {
@@ -2562,18 +2602,30 @@ INDEX_HTML = """<!doctype html>
         episodeVideo.load();
       }
       const playPromise = episodeVideo.play();
-      if (playPromise) playPromise.catch(() => {});
+      if (playPromise) {
+        playPromise.catch(error => {
+          updatePlayerMeta(context, "جاهز، اضغط تشغيل");
+          setStatus(cleanClientText(error && error.message) || "الفيديو جاهز، اضغط تشغيل داخل المشغل.");
+        });
+      }
       playerPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
 
     playerClose.addEventListener("click", () => {
-      showPlayerState("المشغل المباشر", "اختر حلقة أو فيلما وسيعمل هنا مباشرة داخل الصفحة.");
+      showPlayerState("المشغل المباشر", "اختر حلقة أو فيلما وسيعمل هنا مباشرة داخل الصفحة.", false, {}, "بانتظار الاختيار", true);
     });
+
+    episodeVideo.addEventListener("loadstart", () => updatePlayerMeta(currentPlayerContext, "جاري تحميل الفيديو"));
+    episodeVideo.addEventListener("waiting", () => updatePlayerMeta(currentPlayerContext, "جاري التخزين المؤقت"));
+    episodeVideo.addEventListener("canplay", () => updatePlayerMeta(currentPlayerContext, "جاهز للتشغيل"));
+    episodeVideo.addEventListener("playing", () => updatePlayerMeta(currentPlayerContext, "يعمل الآن"));
 
     episodeVideo.addEventListener("error", () => {
       if (!episodeVideo.hidden && episodeVideo.currentSrc) {
-        showPlayerState(playerTitle.textContent, "تعذر تشغيل رابط الفيديو المباشر داخل المتصفح.", true);
-        setStatus("تعذر تشغيل رابط الفيديو المباشر.", true);
+        const reason = episodeVideo.error ? `رمز الخطأ ${episodeVideo.error.code}` : "تعذر تحميل الفيديو.";
+        const message = playbackFailureMessage(reason);
+        showPlayerState(playerTitle.textContent, message, true, currentPlayerContext);
+        setStatus(message, true);
       }
     });
 
@@ -2624,7 +2676,10 @@ INDEX_HTML = """<!doctype html>
           if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
           episodeMetaCache.set(key, data);
         }
-        list.innerHTML = episodeLinksMarkup(data.episodes || []);
+        list.innerHTML = episodeLinksMarkup(data.episodes || [], {
+          name: button.dataset.name || "",
+          source: button.dataset.source || "",
+        });
         button.dataset.loaded = "1";
       } catch (error) {
         list.innerHTML = `<span class="inline-error">${escapeHtml(error.message)}</span>`;
@@ -2639,7 +2694,9 @@ INDEX_HTML = """<!doctype html>
       const link = event.target.closest(".episode-play");
       if (!link) return;
       event.preventDefault();
-      const title = link.dataset.title || link.textContent;
+      const context = playerContextFromLink(link);
+      const title = context.title || link.dataset.title || link.textContent;
+      showPlayerState(title, "جاري تجهيز رابط الفيديو المباشر داخل الصفحة.", false, context, "جاري تجهيز الرابط", true);
       setStatus("جاري تجهيز المشغل...");
       try {
         const params = new URLSearchParams({ url: link.href, stream_id: link.dataset.streamId || "" });
@@ -2648,11 +2705,12 @@ INDEX_HTML = """<!doctype html>
         if (!response.ok) throw new Error(data.error || "تعذر تجهيز المشغل");
         const selected = data.selected;
         if (!selected || selected.kind !== "video") throw new Error("لا يوجد رابط فيديو مباشر قابل للتشغيل داخل الصفحة.");
-        openPlayer(selected.url, title);
+        openPlayer(selected.url, title, context);
         setStatus("تم تشغيل الفيديو داخل الصفحة.");
       } catch (error) {
-        showPlayerState(title, error.message, true);
-        setStatus(error.message, true);
+        const message = playbackFailureMessage(error.message || "تعذر تجهيز المشغل.");
+        showPlayerState(title, message, true, context);
+        setStatus(message, true);
       }
     });
 

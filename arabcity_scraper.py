@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -95,6 +96,22 @@ CATALOG_ROUTES: dict[str, CatalogRoute] = {
     "alooytv-ramadan-2025": CatalogRoute("alooytv", "رمضان 2025", "/home/", "series", ("رمضان", "2025")),
     "alooytv-ramadan-2026": CatalogRoute("alooytv", "رمضان 2026", "/home/", "series", ("رمضان", "2026")),
 }
+
+COMPLETE_LIBRARY_CATALOG_ID = "arabcity-complete-library"
+CATALOG_GROUPS: dict[str, tuple[str, ...]] = {
+    COMPLETE_LIBRARY_CATALOG_ID: tuple(CATALOG_ROUTES),
+}
+VIRTUAL_CATALOGS = [
+    {"type": "ArabCity-combined", "id": COMPLETE_LIBRARY_CATALOG_ID, "name": "⭐ المكتبة الكاملة: أفلام ومسلسلات"},
+]
+
+
+def available_catalogs() -> list[dict[str, str]]:
+    return [*VIRTUAL_CATALOGS, *MANIFEST["catalogs"]]
+
+
+def all_catalog_ids() -> tuple[str, ...]:
+    return (*CATALOG_GROUPS, *CATALOG_ROUTES)
 
 
 NOISE_TITLES = {
@@ -848,8 +865,6 @@ def addon_catalog_items(catalog_id: str, route: CatalogRoute, pages: int, search
             item = media_item_from_addon_meta(meta, route)
             if item:
                 items.append(item)
-        if not metas:
-            errors.append(f"ArabCity addon returned 0 items at {url}")
     return items, errors, fetched_urls
 
 
@@ -913,6 +928,9 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
             continue
         if item.image and not current.image:
             current.image = item.image
+        current_sources = {source.strip() for source in current.source.split("+") if source.strip()}
+        if item.source and item.source not in current_sources:
+            current.source = "+".join(sorted([*current_sources, item.source]))
         current.raw_titles.extend(title for title in item.raw_titles if title not in current.raw_titles)
         current.discovered_episodes.update(item.discovered_episodes)
         if item.episode_count and (not current.episode_count or item.episode_count > current.episode_count):
@@ -920,7 +938,77 @@ def merge_items(items: Iterable[MediaItem]) -> list[MediaItem]:
     return list(merged.values())
 
 
-def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_details: bool = False) -> dict[str, object]:
+def media_item_from_payload(payload: dict[str, object]) -> MediaItem:
+    episode_count = payload.get("episode_count")
+    raw_titles = payload.get("raw_titles")
+    return MediaItem(
+        name=str(payload.get("name") or ""),
+        kind=str(payload.get("kind") or "mixed"),
+        url=str(payload.get("url") or ""),
+        source=str(payload.get("source") or ""),
+        image=str(payload.get("image") or ""),
+        episode_count=int(episode_count) if isinstance(episode_count, int) else None,
+        raw_titles=[str(title) for title in raw_titles] if isinstance(raw_titles, list) else [],
+    )
+
+
+def scrape_catalog_group(catalog_id: str, pages: int = 1, search: str = "", fetch_details: bool = False) -> dict[str, object]:
+    child_catalogs = CATALOG_GROUPS.get(catalog_id)
+    if not child_catalogs:
+        raise ValueError(f"Unknown catalog id: {catalog_id}")
+    pages = max(1, min(int(pages), 25))
+    errors: list[str] = []
+    fetched_urls: list[str] = []
+    items: list[MediaItem] = []
+    try:
+        requested_workers = int(os.environ.get("ARABCITY_GROUP_WORKERS", "8"))
+    except ValueError:
+        requested_workers = 8
+    workers = max(1, min(len(child_catalogs), requested_workers))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                scrape_single_catalog,
+                child_id,
+                pages=pages,
+                search=search,
+                fetch_details=fetch_details,
+                fallback_to_site=False,
+            ): child_id
+            for child_id in child_catalogs
+        }
+        for future in as_completed(futures):
+            child_id = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001 - one catalog should not hide the rest of the library.
+                errors.append(f"{child_id}: {exc}")
+                continue
+            errors.extend(str(error) for error in result.get("errors", []))
+            fetched_urls.extend(str(url) for url in result.get("urls", []))
+            payload_items = result.get("items", [])
+            if isinstance(payload_items, list):
+                items.extend(media_item_from_payload(item) for item in payload_items if isinstance(item, dict))
+    merged_items = merge_items(item for item in items if item.name and item.url)
+    merged_items.sort(key=lambda item: (item.kind != "series", item.name))
+    return {
+        "catalog": catalog_id,
+        "catalog_name": "المكتبة الكاملة",
+        "source": "combined",
+        "urls": fetched_urls,
+        "count": len(merged_items),
+        "errors": errors,
+        "items": [item.to_dict() for item in merged_items],
+    }
+
+
+def scrape_single_catalog(
+    catalog_id: str,
+    pages: int = 1,
+    search: str = "",
+    fetch_details: bool = False,
+    fallback_to_site: bool = True,
+) -> dict[str, object]:
     route = CATALOG_ROUTES.get(catalog_id)
     if not route:
         raise ValueError(f"Unknown catalog id: {catalog_id}")
@@ -930,6 +1018,8 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
     used_addon_catalog = bool(scraped_items)
     for page in range(1, pages + 1):
         if used_addon_catalog:
+            break
+        if not fallback_to_site:
             break
         page_errors: list[str] = []
         page_items: list[MediaItem] = []
@@ -977,6 +1067,12 @@ def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_deta
         "errors": errors,
         "items": [item.to_dict() for item in items],
     }
+
+
+def scrape_catalog(catalog_id: str, pages: int = 1, search: str = "", fetch_details: bool = False) -> dict[str, object]:
+    if catalog_id in CATALOG_GROUPS:
+        return scrape_catalog_group(catalog_id, pages=pages, search=search, fetch_details=fetch_details)
+    return scrape_single_catalog(catalog_id, pages=pages, search=search, fetch_details=fetch_details)
 
 
 INDEX_HTML = """<!doctype html>
@@ -1457,8 +1553,8 @@ INDEX_HTML = """<!doctype html>
             <input id="pages" type="number" min="1" max="25" value="1">
           </label>
           <label class="toggle">
-            <input id="details" type="checkbox" checked>
-            حساب الحلقات
+            <input id="details" type="checkbox">
+            تفاصيل أعمق
           </label>
           <label class="search-field">بحث داخل النتائج
             <input id="search" type="search" placeholder="اختياري">
@@ -1537,7 +1633,7 @@ INDEX_HTML = """<!doctype html>
         catalog.appendChild(option);
       }
       refreshIcons();
-      const defaultOption = catalog.querySelector('option[value="akoam-series-all"]');
+      const defaultOption = catalog.querySelector('option[value="arabcity-complete-library"]');
       if (defaultOption) catalog.value = defaultOption.value;
       await loadItems({ initial: true });
     }
@@ -1779,11 +1875,11 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             self.send_text(INDEX_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/catalogs":
-            self.send_json({"manifest": MANIFEST, "catalogs": MANIFEST["catalogs"]})
+            self.send_json({"manifest": MANIFEST, "catalogs": available_catalogs()})
             return
         if parsed.path == "/api/scrape":
             params = parse_qs(parsed.query)
-            catalog = params.get("catalog", ["akoam-series-all"])[0]
+            catalog = params.get("catalog", [COMPLETE_LIBRARY_CATALOG_ID])[0]
             pages = int(params.get("pages", ["1"])[0] or "1")
             search = params.get("search", [""])[0]
             details = params.get("details", ["0"])[0] in {"1", "true", "yes"}
@@ -1851,7 +1947,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scrape_parser = subparsers.add_parser("scrape", help="Scrape one catalog.")
-    scrape_parser.add_argument("--catalog", default="akoam-series-all", choices=sorted(CATALOG_ROUTES))
+    scrape_parser.add_argument("--catalog", default=COMPLETE_LIBRARY_CATALOG_ID, choices=sorted(all_catalog_ids()))
     scrape_parser.add_argument("--pages", type=int, default=1)
     scrape_parser.add_argument("--search", default="")
     scrape_parser.add_argument("--details", action="store_true", help="Fetch detail pages to improve episode counts.")

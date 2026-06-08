@@ -2,8 +2,10 @@ import unittest
 from unittest.mock import patch
 
 from arabcity_scraper import (
+    COMPLETE_LIBRARY_CATALOG_ID,
     CATALOG_ROUTES,
     PlayerLink,
+    available_catalogs,
     count_episodes_from_html,
     detect_episode_number,
     direct_video_players,
@@ -15,6 +17,7 @@ from arabcity_scraper import (
     normalize_media_name,
     player_from_addon_stream,
     request_safe_url,
+    scrape_catalog,
     scrape_player,
     stremio_url,
 )
@@ -148,6 +151,76 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(item.url, "https://akwam.it/series/5597/from-4")
         self.assertEqual(item.kind, "series")
         self.assertEqual(item.image, "https://img.example.test/poster.jpg")
+
+    def test_available_catalogs_starts_with_complete_library(self):
+        catalogs = available_catalogs()
+        self.assertEqual(catalogs[0]["id"], COMPLETE_LIBRARY_CATALOG_ID)
+
+    def test_complete_library_scrapes_all_catalogs_and_merges_duplicates(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):
+            self.assertEqual(pages, 2)
+            self.assertEqual(search, "from")
+            self.assertFalse(fallback_to_site)
+            if catalog_id == "akoam-series-all":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "From",
+                            "kind": "series",
+                            "url": "https://akwam.example/series/from",
+                            "source": "akwam",
+                            "image": "",
+                            "episode_count": 7,
+                            "raw_titles": ["From"],
+                        }
+                    ],
+                }
+            if catalog_id == "alooytv-arabic":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "From",
+                            "kind": "series",
+                            "url": "https://alooytv.example/series/from",
+                            "source": "alooytv",
+                            "image": "https://img.example/from.jpg",
+                            "episode_count": 8,
+                            "raw_titles": ["From Arabic"],
+                        }
+                    ],
+                }
+            if catalog_id == "akoam-movies-all":
+                return {
+                    "urls": [f"https://example.test/{catalog_id}"],
+                    "errors": [],
+                    "items": [
+                        {
+                            "name": "Inception",
+                            "kind": "movie",
+                            "url": "https://akwam.example/movie/inception",
+                            "source": "akwam",
+                            "image": "",
+                            "episode_count": None,
+                            "raw_titles": ["Inception"],
+                        }
+                    ],
+                }
+            return {"urls": [f"https://example.test/{catalog_id}"], "errors": [], "items": []}
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
+            result = scrape_catalog(COMPLETE_LIBRARY_CATALOG_ID, pages=2, search="from")
+
+        self.assertEqual(mocked.call_count, len(CATALOG_ROUTES))
+        self.assertEqual(result["count"], 2)
+        by_name = {item["name"]: item for item in result["items"]}
+        self.assertEqual(by_name["From"]["episode_count"], 8)
+        self.assertEqual(by_name["From"]["image"], "https://img.example/from.jpg")
+        self.assertEqual(by_name["From"]["source"], "akwam+alooytv")
+        self.assertEqual(by_name["Inception"]["kind"], "movie")
 
 
 if __name__ == "__main__":

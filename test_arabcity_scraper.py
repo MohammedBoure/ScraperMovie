@@ -6,6 +6,7 @@ from arabcity_scraper import (
     detect_episode_number,
     extract_episode_links,
     extract_media_items,
+    extract_player_links,
     is_allowed_source_url,
     normalize_media_name,
     request_safe_url,
@@ -84,6 +85,16 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn("%D8%A7%D9%84%D8%AA%D8%B1%D8%A8%D9%8A%D8%A9", safe_url)
         self.assertIn("name=%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9%201", safe_url)
         safe_url.encode("ascii")
+
+    def test_extract_player_links_prefers_direct_video(self):
+        html = """
+        <iframe src="/embed/episode-1"></iframe>
+        <video><source src="https://cdn.example.test/media/episode-1.mp4"></video>
+        """
+        players = extract_player_links(html, "https://tv.akwam.tv/watch/episode-1")
+        self.assertEqual(players[0].kind, "video")
+        self.assertEqual(players[0].url, "https://cdn.example.test/media/episode-1.mp4")
+        self.assertEqual(players[1].url, "https://tv.akwam.tv/embed/episode-1")
 
 
 if __name__ == "__main__":

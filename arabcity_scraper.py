@@ -165,6 +165,20 @@ class EpisodeLink:
         }
 
 
+@dataclass(frozen=True)
+class PlayerLink:
+    url: str
+    kind: str
+    title: str = "Direct player"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "url": self.url,
+            "kind": self.kind,
+            "title": self.title,
+        }
+
+
 class LinkExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -243,6 +257,23 @@ class TokenExtractor(HTMLParser):
             self._link_href = None
             self._link_text = []
             self._link_image = ""
+
+
+class PlayerExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.players: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = {key.lower(): value or "" for key, value in attrs}
+        src = attrs_map.get("src") or attrs_map.get("data-src") or attrs_map.get("data-lazy-src")
+        if not src:
+            return
+        tag = tag.lower()
+        if tag in {"iframe", "embed"}:
+            self.players.append((src, "iframe"))
+        elif tag in {"video", "source"}:
+            self.players.append((src, "video" if is_video_url(src) else "iframe"))
 
 
 def clean_spaces(value: str) -> str:
@@ -590,6 +621,69 @@ def extract_episode_links(document: str, page_source_url: str) -> list[EpisodeLi
     )
 
 
+BLOCKED_PLAYER_HOST_TERMS = (
+    "doubleclick",
+    "googlesyndication",
+    "google-analytics",
+    "facebook",
+    "twitter",
+    "adservice",
+    "taboola",
+)
+
+
+def is_video_url(url: str) -> bool:
+    return bool(re.search(r"\.(?:mp4|m3u8|mpd|webm|ogg|mov)(?:$|[?#])", urlparse(url).path.casefold()))
+
+
+def player_score(player: PlayerLink, page_url: str) -> tuple[int, str]:
+    parsed = urlparse(player.url)
+    path = parsed.path.casefold()
+    host = parsed.netloc.casefold()
+    score = 0
+    if player.kind == "video":
+        score += 60
+    if re.search(r"(?:embed|player|watch|video|stream)", path):
+        score += 30
+    if host and host != urlparse(page_url).netloc.casefold():
+        score += 5
+    if any(term in host for term in BLOCKED_PLAYER_HOST_TERMS):
+        score -= 100
+    return score, player.url
+
+
+def extract_player_links(document: str, page_source_url: str) -> list[PlayerLink]:
+    parser = PlayerExtractor()
+    parser.feed(document)
+    players: dict[str, PlayerLink] = {}
+    for raw_url, kind in parser.players:
+        url = urljoin(page_source_url, clean_spaces(raw_url))
+        if not is_allowed_source_url(url):
+            continue
+        players[url.rstrip("/")] = PlayerLink(url=url, kind=kind)
+    for match in re.finditer(r"https?://[^\s\"'<>]+", document):
+        url = html.unescape(match.group(0)).rstrip(").,;")
+        if not is_video_url(url) or not is_allowed_source_url(url):
+            continue
+        players[url.rstrip("/")] = PlayerLink(url=url, kind="video", title="Direct video")
+    return sorted(players.values(), key=lambda player: player_score(player, page_source_url), reverse=True)
+
+
+def scrape_player(media_url: str) -> dict[str, object]:
+    if not media_url:
+        raise ValueError("Missing media URL")
+    if not is_allowed_source_url(media_url):
+        raise ValueError("Unsupported media URL")
+    document = fetch_html(media_url)
+    players = extract_player_links(document, media_url)
+    selected = players[0] if players else PlayerLink(url=media_url, kind="page", title="Episode page")
+    return {
+        "url": media_url,
+        "selected": selected.to_dict(),
+        "players": [player.to_dict() for player in players],
+    }
+
+
 def scrape_episodes(media_url: str) -> dict[str, object]:
     if not media_url:
         raise ValueError("Missing media URL")
@@ -722,6 +816,8 @@ INDEX_HTML = """<!doctype html>
     .player-controls { display: flex; gap: 8px; flex: 0 0 auto; }
     .player-controls a, .player-controls button { min-height: 34px; border-radius: 6px; border: 1px solid #334155; padding: 0 10px; background: #1f2937; color: white; font: inherit; }
     .player-frame { display: block; width: 100%; height: min(68vh, 720px); border: 0; background: #020617; }
+    .player-video { display: block; width: 100%; max-height: min(68vh, 720px); background: #020617; }
+    .player-frame[hidden], .player-video[hidden] { display: none; }
     @media (max-width: 760px) {
       form { grid-template-columns: 1fr; }
       th:nth-child(5), td:nth-child(5) { display: none; }
@@ -775,6 +871,7 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
       <iframe id="episodePlayer" class="player-frame" title="مشغل الحلقة" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer"></iframe>
+      <video id="episodeVideo" class="player-video" controls playsinline hidden></video>
     </section>
   </main>
   <script>
@@ -783,6 +880,7 @@ INDEX_HTML = """<!doctype html>
     const statusBox = document.querySelector("#status");
     const playerPanel = document.querySelector("#playerPanel");
     const episodePlayer = document.querySelector("#episodePlayer");
+    const episodeVideo = document.querySelector("#episodeVideo");
     const playerTitle = document.querySelector("#playerTitle");
     const playerExternal = document.querySelector("#playerExternal");
     const playerClose = document.querySelector("#playerClose");
@@ -841,16 +939,32 @@ INDEX_HTML = """<!doctype html>
       return String(value || "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[ch]));
     }
 
-    function openPlayer(url, title) {
+    function openPlayer(url, title, kind = "iframe") {
       playerTitle.textContent = title || "المشغل";
       playerExternal.href = url;
-      episodePlayer.src = url;
+      episodePlayer.src = "about:blank";
+      episodeVideo.pause();
+      episodeVideo.removeAttribute("src");
+      episodeVideo.load();
+      if (kind === "video") {
+        episodePlayer.hidden = true;
+        episodeVideo.hidden = false;
+        episodeVideo.src = url;
+        episodeVideo.load();
+      } else {
+        episodeVideo.hidden = true;
+        episodePlayer.hidden = false;
+        episodePlayer.src = url;
+      }
       playerPanel.classList.add("active");
       playerPanel.scrollIntoView({ behavior: "smooth", block: "end" });
     }
 
     playerClose.addEventListener("click", () => {
       episodePlayer.src = "about:blank";
+      episodeVideo.pause();
+      episodeVideo.removeAttribute("src");
+      episodeVideo.load();
       playerPanel.classList.remove("active");
     });
 
@@ -908,11 +1022,23 @@ INDEX_HTML = """<!doctype html>
       }
     });
 
-    rows.addEventListener("click", (event) => {
+    rows.addEventListener("click", async (event) => {
       const link = event.target.closest(".episode-play");
       if (!link) return;
       event.preventDefault();
-      openPlayer(link.href, link.dataset.title || link.textContent);
+      const title = link.dataset.title || link.textContent;
+      setStatus("جاري استخراج رابط المشغل...");
+      try {
+        const response = await fetch(`/api/player?url=${encodeURIComponent(link.href)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "تعذر استخراج رابط المشغل");
+        const selected = data.selected || { url: link.href, kind: "page" };
+        openPlayer(selected.url, title, selected.kind);
+        setStatus(selected.kind === "page" ? "لم يتم العثور على رابط مباشر، تم فتح صفحة الحلقة داخل المشغل." : "تم استخراج رابط المشغل.");
+      } catch (error) {
+        openPlayer(link.href, title, "page");
+        setStatus(error.message, true);
+      }
     });
 
     loadCatalogs().catch(error => setStatus(error.message, true));
@@ -947,6 +1073,14 @@ class ArabCityHandler(BaseHTTPRequestHandler):
             media_url = params.get("url", [""])[0]
             try:
                 self.send_json(scrape_episodes(media_url))
+            except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/player":
+            params = parse_qs(parsed.query)
+            media_url = params.get("url", [""])[0]
+            try:
+                self.send_json(scrape_player(media_url))
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return

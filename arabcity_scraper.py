@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from copy import deepcopy
 import html
 import ipaddress
 import json
@@ -49,10 +50,13 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
 
 
 EPISODE_CACHE_LIMIT = env_int("ARABCITY_EPISODE_CACHE_SIZE", 128)
+CATALOG_CACHE_LIMIT = env_int("ARABCITY_CATALOG_CACHE_SIZE", 32)
 EPISODE_META_CACHE: OrderedDict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_META_CACHE_LOCK = Lock()
 EPISODE_LINKS_CACHE: OrderedDict[str, tuple[list["EpisodeLink"], list[str]]] = OrderedDict()
 EPISODE_LINKS_CACHE_LOCK = Lock()
+CATALOG_CACHE: OrderedDict[tuple[str, int, str, bool, bool], dict[str, object]] = OrderedDict()
+CATALOG_CACHE_LOCK = Lock()
 EPISODE_DIGIT_TRANSLATION = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
 
@@ -1179,6 +1183,49 @@ def media_item_from_payload(payload: dict[str, object]) -> MediaItem:
     )
 
 
+def catalog_cache_key(
+    catalog_id: str,
+    pages: int = 1,
+    search: str = "",
+    fetch_details: bool = False,
+    playable_only: bool = False,
+) -> tuple[str, int, str, bool, bool]:
+    return catalog_id, max(1, min(int(pages), 25)), clean_spaces(search), bool(fetch_details), bool(playable_only)
+
+
+def trim_catalog_cache(limit: int | None = None) -> None:
+    limit = CATALOG_CACHE_LIMIT if limit is None else limit
+    while len(CATALOG_CACHE) > limit:
+        CATALOG_CACHE.popitem(last=False)
+
+
+def clear_catalog_cache() -> None:
+    with CATALOG_CACHE_LOCK:
+        CATALOG_CACHE.clear()
+
+
+def cached_catalog_result(key: tuple[str, int, str, bool, bool]) -> dict[str, object] | None:
+    with CATALOG_CACHE_LOCK:
+        cached = CATALOG_CACHE.get(key)
+        if cached is not None:
+            CATALOG_CACHE.move_to_end(key)
+    if cached is None:
+        return None
+    result = deepcopy(cached)
+    result["cached"] = True
+    return result
+
+
+def store_catalog_result(key: tuple[str, int, str, bool, bool], result: dict[str, object]) -> dict[str, object]:
+    stored = deepcopy(result)
+    stored["cached"] = False
+    with CATALOG_CACHE_LOCK:
+        CATALOG_CACHE[key] = stored
+        CATALOG_CACHE.move_to_end(key)
+        trim_catalog_cache()
+    return deepcopy(stored)
+
+
 def scrape_catalog_group(
     catalog_id: str,
     pages: int = 1,
@@ -1318,9 +1365,35 @@ def scrape_catalog(
     fetch_details: bool = False,
     playable_only: bool = False,
 ) -> dict[str, object]:
+    key = catalog_cache_key(
+        catalog_id,
+        pages=pages,
+        search=search,
+        fetch_details=fetch_details,
+        playable_only=playable_only,
+    )
+    cached = cached_catalog_result(key)
+    if cached is not None:
+        return cached
+
+    catalog_id, pages, search, fetch_details, playable_only = key
     if catalog_id in CATALOG_GROUPS:
-        return scrape_catalog_group(catalog_id, pages=pages, search=search, fetch_details=fetch_details, playable_only=playable_only)
-    return scrape_single_catalog(catalog_id, pages=pages, search=search, fetch_details=fetch_details, playable_only=playable_only)
+        result = scrape_catalog_group(
+            catalog_id,
+            pages=pages,
+            search=search,
+            fetch_details=fetch_details,
+            playable_only=playable_only,
+        )
+    else:
+        result = scrape_single_catalog(
+            catalog_id,
+            pages=pages,
+            search=search,
+            fetch_details=fetch_details,
+            playable_only=playable_only,
+        )
+    return store_catalog_result(key, result)
 
 
 INDEX_HTML = """<!doctype html>

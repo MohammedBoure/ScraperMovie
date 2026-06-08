@@ -11,6 +11,7 @@ from arabcity_scraper import (
     MediaItem,
     PlayerLink,
     available_catalogs,
+    clear_catalog_cache,
     clear_episode_cache,
     clear_episode_caches,
     count_episodes_from_html,
@@ -36,6 +37,7 @@ from arabcity_scraper import (
 
 class ArabCityScraperTests(unittest.TestCase):
     def setUp(self):
+        clear_catalog_cache()
         clear_episode_caches()
 
     def test_detect_episode_number_arabic(self):
@@ -313,6 +315,69 @@ class ArabCityScraperTests(unittest.TestCase):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)
         self.assertEqual(manifest_catalog_ids(), expected)
         self.assertEqual(CATALOG_GROUPS[COMPLETE_LIBRARY_CATALOG_ID], expected)
+
+    def test_scrape_catalog_caches_results_by_request_parameters(self):
+        result_payload = {
+            "catalog": "akoam-movies-all",
+            "catalog_name": "Movies",
+            "source": "akwam",
+            "urls": ["https://example.test/movies"],
+            "count": 1,
+            "playable_only": False,
+            "stats": {"total": 1},
+            "errors": [],
+            "items": [
+                {
+                    "name": "Ready Movie",
+                    "kind": "movie",
+                    "url": "https://akwam.example/movie/ready",
+                    "source": "akwam",
+                    "image": "",
+                    "episode_count": None,
+                    "raw_titles": ["Ready Movie"],
+                }
+            ],
+        }
+
+        with patch("arabcity_scraper.scrape_single_catalog", return_value=result_payload) as mocked:
+            first = scrape_catalog("akoam-movies-all", pages=2, search=" ready ", fetch_details=True)
+            first["items"][0]["name"] = "Mutated"
+            second = scrape_catalog("akoam-movies-all", pages=2, search="ready", fetch_details=True)
+
+        mocked.assert_called_once_with(
+            "akoam-movies-all",
+            pages=2,
+            search="ready",
+            fetch_details=True,
+            playable_only=False,
+        )
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(second["items"][0]["name"], "Ready Movie")
+
+    def test_scrape_catalog_cache_separates_playable_only(self):
+        def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, playable_only=False):
+            return {
+                "catalog": catalog_id,
+                "catalog_name": "Movies",
+                "source": "akwam",
+                "urls": [],
+                "count": 1 if playable_only else 2,
+                "playable_only": playable_only,
+                "stats": {"total": 1 if playable_only else 2},
+                "errors": [],
+                "items": [],
+            }
+
+        with patch("arabcity_scraper.scrape_single_catalog", side_effect=fake_scrape_single) as mocked:
+            normal = scrape_catalog("akoam-movies-all", playable_only=False)
+            playable = scrape_catalog("akoam-movies-all", playable_only=True)
+            normal_again = scrape_catalog("akoam-movies-all", playable_only=False)
+
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(normal["count"], 2)
+        self.assertEqual(playable["count"], 1)
+        self.assertTrue(normal_again["cached"])
 
     def test_complete_library_scrapes_all_catalogs_and_merges_duplicates(self):
         def fake_scrape_single(catalog_id, pages=1, search="", fetch_details=False, fallback_to_site=True):

@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
@@ -36,6 +37,8 @@ DEFAULT_AKWAM_BASE_URLS = (
     "https://akwams.org",
 )
 QUALITY_WORDS = "WEB-DL|HDTV|BluRay|WebRip|BRRIP|DVDrip|DVDSCR|HD|HDTS|CAM|BDRIP|HDRIP|HC"
+EPISODE_META_CACHE: dict[tuple[str, str, str], tuple[list["EpisodeLink"], list[str]]] = {}
+EPISODE_META_CACHE_LOCK = Lock()
 
 
 MANIFEST = {
@@ -804,6 +807,39 @@ def addon_episode_links(media_url: str, source: str = "akwam", name: str = "") -
     )
 
 
+def episode_meta_cache_key(media_url: str, source: str = "akwam", name: str = "") -> tuple[str, str, str]:
+    return media_url.rstrip("/"), source or "akwam", name.casefold()
+
+
+def clear_episode_meta_cache() -> None:
+    with EPISODE_META_CACHE_LOCK:
+        EPISODE_META_CACHE.clear()
+
+
+def cached_addon_episode_links(media_url: str, source: str = "akwam", name: str = "") -> tuple[list[EpisodeLink], list[str]]:
+    key = episode_meta_cache_key(media_url, source, name)
+    with EPISODE_META_CACHE_LOCK:
+        cached = EPISODE_META_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    errors: list[str] = []
+    episodes: list[EpisodeLink] = []
+    for source_name in item_sources(source):
+        try:
+            episodes = addon_episode_links(media_url, source=source_name, name=name)
+        except Exception as exc:  # noqa: BLE001 - meta prechecks should degrade to "unconfirmed".
+            errors.append(str(exc))
+            continue
+        if episodes:
+            break
+
+    result = (episodes, errors)
+    with EPISODE_META_CACHE_LOCK:
+        EPISODE_META_CACHE[key] = result
+    return result
+
+
 def player_from_addon_stream(stream_id: str, item_type: str = "ArabCity-Akwam") -> list[PlayerLink]:
     if not stream_id:
         return []
@@ -846,10 +882,7 @@ def playable_stream_count(item: MediaItem) -> int:
             if players:
                 return len(players)
         if item.kind in {"series", "mixed"}:
-            try:
-                episodes = addon_episode_links(item.url, source=source, name=item.name)
-            except RuntimeError:
-                episodes = []
+            episodes, _errors = cached_addon_episode_links(item.url, source=source, name=item.name)
             for episode in episodes:
                 if not episode.stream_id:
                     continue
@@ -972,17 +1005,31 @@ def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
     }
 
 
-def scrape_episodes(media_url: str) -> dict[str, object]:
+def scrape_episode_meta(media_url: str, source: str = "akwam", name: str = "") -> dict[str, object]:
+    if not media_url:
+        raise ValueError("Missing media URL")
+    if not is_allowed_source_url(media_url):
+        raise ValueError("Unsupported media URL")
+    episodes, errors = cached_addon_episode_links(media_url, source=source, name=name)
+    return {
+        "url": media_url,
+        "source": source,
+        "name": name,
+        "checked": True,
+        "count": len(episodes),
+        "errors": errors,
+        "episodes": [episode.to_dict() for episode in episodes],
+    }
+
+
+def scrape_episodes(media_url: str, source: str = "akwam", name: str = "") -> dict[str, object]:
     if not media_url:
         raise ValueError("Missing media URL")
     if not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
     errors: list[str] = []
-    episodes: list[EpisodeLink] = []
-    try:
-        episodes = addon_episode_links(media_url)
-    except RuntimeError as exc:
-        errors.append(str(exc))
+    episodes, meta_errors = cached_addon_episode_links(media_url, source=source, name=name)
+    errors.extend(meta_errors)
     if not episodes:
         document = fetch_html(media_url)
         episodes = extract_episode_links(document, media_url)
@@ -1741,6 +1788,8 @@ INDEX_HTML = """<!doctype html>
     let autoLoadController = null;
     let hlsInstance = null;
     let searchTimer = null;
+    let renderBatch = 0;
+    const episodeMetaCache = new Map();
 
     function refreshIcons() {
       if (window.lucide) window.lucide.createIcons();
@@ -1825,6 +1874,8 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderItems(items) {
+      renderBatch += 1;
+      const batch = renderBatch;
       rows.innerHTML = "";
       if (!items.length) {
         rows.innerHTML = `<div class="empty-state"><div><i data-lucide="search-x"></i><h3>لا توجد نتائج</h3><p>جرّب كتالوجا آخر أو غيّر عبارة البحث.</p></div></div>`;
@@ -1836,8 +1887,7 @@ INDEX_HTML = """<!doctype html>
         card.className = "media-card";
         const raw = item.raw_titles && item.raw_titles.length ? `<div class="raw">${escapeHtml(item.raw_titles[0])}</div>` : `<div class="raw">&nbsp;</div>`;
         const kindLabel = item.kind === "series" ? "مسلسل" : item.kind === "movie" ? "فيلم" : "مختلط";
-        const episodes = item.kind === "series" ? (item.episode_count || "غير معروف") : "-";
-        const countLabel = item.kind === "series" ? (item.episode_count ? `${episodes} حلقة` : "الحلقات جاهزة") : "فيلم";
+        const countLabel = episodeCountLabel(item);
         card.innerHTML = `
           <div class="poster-wrap">
             ${posterMarkup(item)}
@@ -1850,7 +1900,7 @@ INDEX_HTML = """<!doctype html>
             ${raw}
             <div class="card-meta">
               <span class="pill"><i data-lucide="layers"></i>${kindLabel}</span>
-              <span>${countLabel}</span>
+              <span class="episode-count" data-url="${escapeHtml(item.url)}" data-source="${escapeHtml(item.source)}" data-name="${escapeHtml(item.name)}">${countLabel}</span>
             </div>
             ${actionsMarkup(item)}
           </div>
@@ -1858,6 +1908,13 @@ INDEX_HTML = """<!doctype html>
         rows.appendChild(card);
       }
       refreshIcons();
+      prefetchSeriesEpisodeMeta(items, batch);
+    }
+
+    function episodeCountLabel(item) {
+      if (item.kind !== "series") return "فيلم";
+      if (item.episode_count) return `${item.episode_count} حلقة`;
+      return "قيد فحص الحلقات";
     }
 
     function actionsMarkup(item) {
@@ -1868,11 +1925,83 @@ INDEX_HTML = """<!doctype html>
       if (item.kind !== "series") return `<div class="actions">${watchLink}<span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span></div>`;
       return `
         <div class="actions">
-          <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
+          <button class="watch-now episodes-button" type="button" data-url="${escapeHtml(item.url)}" data-source="${escapeHtml(item.source)}" data-name="${escapeHtml(item.name)}"><i data-lucide="list-video"></i><span>الحلقات والمشاهدة</span></button>
           <span class="direct-chip"><i data-lucide="${directIcon}"></i>${directText}</span>
           <div class="episode-list"></div>
         </div>
       `;
+    }
+
+    function episodeMetaKey(url, source, name) {
+      return `${url || ""}|${source || "akwam"}|${name || ""}`;
+    }
+
+    function findEpisodeElement(selector, item) {
+      return Array.from(rows.querySelectorAll(selector)).find(element =>
+        element.dataset.url === item.url &&
+        element.dataset.source === item.source &&
+        element.dataset.name === item.name
+      );
+    }
+
+    function episodeLinksMarkup(episodes) {
+      if (!episodes || !episodes.length) {
+        return `<span class="inline-error">لا توجد حلقات مؤكدة من ArabCity meta لهذا العمل.</span>`;
+      }
+      return episodes.map(episode => {
+        const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
+        const directClass = episode.stream_id ? " is-direct" : "";
+        const directLabel = episode.stream_id ? "مباشر" : "تحقق";
+        return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
+      }).join("");
+    }
+
+    function applyEpisodeMeta(item, data, batch) {
+      if (batch !== renderBatch) return;
+      const countElement = findEpisodeElement(".episode-count", item);
+      const button = findEpisodeElement(".episodes-button", item);
+      if (countElement) {
+        if (data.count > 0) {
+          countElement.textContent = `${data.count} حلقة`;
+        } else if (!item.episode_count) {
+          countElement.textContent = data.errors && data.errors.length ? "غير مؤكد" : "لا توجد حلقات مؤكدة";
+        }
+      }
+      if (button) {
+        button.dataset.episodeChecked = "1";
+        button.dataset.episodeCount = String(data.count || 0);
+      }
+    }
+
+    async function fetchEpisodeMeta(item, batch) {
+      const key = episodeMetaKey(item.url, item.source, item.name);
+      let data = episodeMetaCache.get(key);
+      if (!data) {
+        const params = new URLSearchParams({ url: item.url, source: item.source || "akwam", name: item.name || "" });
+        const response = await fetch(`/api/episode-meta?${params}`);
+        data = await response.json();
+        if (!response.ok) throw new Error(data.error || "تعذر فحص الحلقات");
+        episodeMetaCache.set(key, data);
+      }
+      applyEpisodeMeta(item, data, batch);
+      return data;
+    }
+
+    async function prefetchSeriesEpisodeMeta(items, batch) {
+      const seriesItems = items.filter(item => item.kind === "series");
+      let index = 0;
+      const workerCount = Math.min(4, seriesItems.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (index < seriesItems.length && batch === renderBatch) {
+          const item = seriesItems[index++];
+          try {
+            await fetchEpisodeMeta(item, batch);
+          } catch (_error) {
+            applyEpisodeMeta(item, { count: 0, errors: ["تعذر فحص الحلقات"] }, batch);
+          }
+        }
+      });
+      await Promise.all(workers);
     }
 
     function posterMarkup(item) {
@@ -1973,19 +2102,20 @@ INDEX_HTML = """<!doctype html>
       refreshIcons();
       list.innerHTML = "";
       try {
-        const response = await fetch(`/api/episodes?url=${encodeURIComponent(button.dataset.url)}`);
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
-        if (!data.episodes.length) {
-          list.innerHTML = `<span class="inline-error">لا توجد حلقات جاهزة للمشغل المباشر لهذا العمل.</span>`;
-        } else {
-          list.innerHTML = data.episodes.map(episode => {
-            const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-            const directClass = episode.stream_id ? " is-direct" : "";
-            const directLabel = episode.stream_id ? "مباشر" : "تحقق";
-            return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
-          }).join("");
+        const key = episodeMetaKey(button.dataset.url, button.dataset.source, button.dataset.name);
+        let data = episodeMetaCache.get(key);
+        if (!data) {
+          const params = new URLSearchParams({
+            url: button.dataset.url,
+            source: button.dataset.source || "akwam",
+            name: button.dataset.name || "",
+          });
+          const response = await fetch(`/api/episodes?${params}`);
+          data = await response.json();
+          if (!response.ok) throw new Error(data.error || "تعذر تحميل الحلقات");
+          episodeMetaCache.set(key, data);
         }
+        list.innerHTML = episodeLinksMarkup(data.episodes || []);
         button.dataset.loaded = "1";
       } catch (error) {
         list.innerHTML = `<span class="inline-error">${escapeHtml(error.message)}</span>`;
@@ -2063,8 +2193,20 @@ class ArabCityHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/episodes":
             params = parse_qs(parsed.query)
             media_url = params.get("url", [""])[0]
+            source = params.get("source", ["akwam"])[0]
+            name = params.get("name", [""])[0]
             try:
-                self.send_json(scrape_episodes(media_url))
+                self.send_json(scrape_episodes(media_url, source=source, name=name))
+            except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if parsed.path == "/api/episode-meta":
+            params = parse_qs(parsed.query)
+            media_url = params.get("url", [""])[0]
+            source = params.get("source", ["akwam"])[0]
+            name = params.get("name", [""])[0]
+            try:
+                self.send_json(scrape_episode_meta(media_url, source=source, name=name))
             except Exception as exc:  # noqa: BLE001 - API must return user-readable errors.
                 self.send_json({"error": str(exc)}, status=400)
             return
@@ -2128,6 +2270,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     episodes_parser = subparsers.add_parser("episodes", help="Extract episode watch links from a media page.")
     episodes_parser.add_argument("--url", required=True)
+    episodes_parser.add_argument("--source", default="akwam")
+    episodes_parser.add_argument("--name", default="")
     episodes_parser.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
 
     serve_parser = subparsers.add_parser("serve", help="Run the local web UI.")
@@ -2146,7 +2290,7 @@ def main(argv: list[str] | None = None) -> int:
         serve(args.host, args.port)
         return 0
     if args.command == "episodes":
-        result = scrape_episodes(args.url)
+        result = scrape_episodes(args.url, source=args.source, name=args.name)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

@@ -6,9 +6,11 @@ from arabcity_scraper import (
     CATALOG_GROUPS,
     CATALOG_ROUTES,
     MANIFEST,
+    EpisodeLink,
     MediaItem,
     PlayerLink,
     available_catalogs,
+    clear_episode_meta_cache,
     count_episodes_from_html,
     detect_episode_number,
     direct_video_players,
@@ -23,12 +25,16 @@ from arabcity_scraper import (
     player_from_addon_stream,
     request_safe_url,
     scrape_catalog,
+    scrape_episode_meta,
     scrape_player,
     stremio_url,
 )
 
 
 class ArabCityScraperTests(unittest.TestCase):
+    def setUp(self):
+        clear_episode_meta_cache()
+
     def test_detect_episode_number_arabic(self):
         self.assertEqual(detect_episode_number("مسلسل المدينة الحلقة 12 مترجمة"), 12)
         self.assertEqual(detect_episode_number("مسلسل المدينة ح 7"), 7)
@@ -89,6 +95,29 @@ class ArabCityScraperTests(unittest.TestCase):
         episodes = extract_episode_links(detail_html, "https://ak.sv/series/ghost-lawyer")
         self.assertEqual([episode.number for episode in episodes], [12, 3, 1])
         self.assertEqual(episodes[0].url, "https://ak.sv/watch/ghost-lawyer-12")
+
+    def test_scrape_episode_meta_counts_and_caches_addon_episodes(self):
+        episodes = [
+            EpisodeLink("الحلقة 2", "https://akwam.example/watch/from-2", number=2, stream_id="stream-2"),
+            EpisodeLink("الحلقة 1", "https://akwam.example/watch/from-1", number=1, stream_id="stream-1"),
+        ]
+        with patch("arabcity_scraper.addon_episode_links", return_value=episodes) as mocked:
+            first = scrape_episode_meta("https://akwam.example/series/from", source="akwam", name="From")
+            second = scrape_episode_meta("https://akwam.example/series/from", source="akwam", name="From")
+
+        mocked.assert_called_once_with("https://akwam.example/series/from", source="akwam", name="From")
+        self.assertTrue(first["checked"])
+        self.assertEqual(first["count"], 2)
+        self.assertEqual(second["count"], 2)
+        self.assertEqual(first["episodes"][0]["stream_id"], "stream-2")
+
+    def test_scrape_episode_meta_returns_uncertain_on_meta_error(self):
+        with patch("arabcity_scraper.addon_episode_links", side_effect=TimeoutError("slow meta")):
+            result = scrape_episode_meta("https://akwam.example/series/from", source="akwam", name="From")
+        self.assertTrue(result["checked"])
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["episodes"], [])
+        self.assertTrue(result["errors"])
 
     def test_episode_source_url_accepts_current_public_domains(self):
         self.assertTrue(is_allowed_source_url("https://current-akwam.example/series/from"))

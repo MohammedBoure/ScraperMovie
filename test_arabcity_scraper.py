@@ -91,22 +91,32 @@ class ArabCityScraperTests(unittest.TestCase):
     def test_extract_episode_links_orders_latest_first(self):
         detail_html = """
         <a href="/series/ghost-lawyer">Ghost Lawyer</a>
-        <a href="/watch/ghost-lawyer-1">مسلسل Ghost Lawyer الحلقة 1 مترجمة</a>
-        <a href="/watch/ghost-lawyer-12">مسلسل Ghost Lawyer الحلقة 12 مترجمة</a>
-        <a href="/watch/ghost-lawyer-3">مسلسل Ghost Lawyer الحلقة 3 مترجمة</a>
+        <a href="/media/ghost-lawyer-1.mp4">مسلسل Ghost Lawyer الحلقة 1 مترجمة</a>
+        <a href="/media/ghost-lawyer-12.mp4">مسلسل Ghost Lawyer الحلقة 12 مترجمة</a>
+        <a href="/media/ghost-lawyer-3.mp4">مسلسل Ghost Lawyer الحلقة 3 مترجمة</a>
         """
         episodes = extract_episode_links(detail_html, "https://ak.sv/series/ghost-lawyer")
         self.assertEqual([episode.number for episode in episodes], [12, 3, 1])
-        self.assertEqual(episodes[0].url, "https://ak.sv/watch/ghost-lawyer-12")
+        self.assertEqual(episodes[0].url, "https://ak.sv/media/ghost-lawyer-12.mp4")
 
     def test_extract_episode_links_orders_arabic_and_english_episode_numbers(self):
         detail_html = """
-        <a href="/watch/show-episode-3">Episode 3</a>
-        <a href="/watch/show-episode-12">الحلقة 12</a>
-        <a href="/watch/show-episode-7">ح 7</a>
+        <a href="/media/show-episode-3.mp4">Episode 3</a>
+        <a href="/media/show-episode-12.mp4">الحلقة 12</a>
+        <a href="/media/show-episode-7.mp4">ح 7</a>
         """
         episodes = extract_episode_links(detail_html, "https://ak.sv/series/show")
         self.assertEqual([episode.number for episode in episodes], [12, 7, 3])
+
+    def test_extract_episode_links_rejects_page_only_watch_links(self):
+        detail_html = """
+        <a href="/watch/show-episode-1">الحلقة 1</a>
+        <a href="/media/show-episode-2.mp4">الحلقة 2</a>
+        """
+        episodes = extract_episode_links(detail_html, "https://ak.sv/series/show")
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0].number, 2)
+        self.assertTrue(episodes[0].to_dict()["playable_reference"])
 
     def test_scrape_episode_meta_counts_and_caches_addon_episodes(self):
         episodes = [
@@ -122,6 +132,18 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertEqual(first["count"], 2)
         self.assertEqual(second["count"], 2)
         self.assertEqual(first["episodes"][0]["stream_id"], "stream-2")
+        self.assertTrue(first["episodes"][0]["playable_reference"])
+
+    def test_scrape_episode_meta_excludes_unplayable_episode_refs(self):
+        episodes = [
+            EpisodeLink("الحلقة 2", "https://akwam.example/watch/from-2", number=2),
+            EpisodeLink("الحلقة 1", "https://akwam.example/media/from-1.mp4", number=1),
+        ]
+        with patch("arabcity_scraper.addon_episode_links", return_value=episodes):
+            result = scrape_episode_meta("https://akwam.example/series/from", source="akwam", name="From")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["episodes"][0]["url"], "https://akwam.example/media/from-1.mp4")
+        self.assertTrue(result["episodes"][0]["playable_reference"])
 
     def test_scrape_episode_meta_returns_uncertain_on_meta_error(self):
         with patch("arabcity_scraper.addon_episode_links", side_effect=TimeoutError("slow meta")):
@@ -175,6 +197,13 @@ class ArabCityScraperTests(unittest.TestCase):
             with self.assertRaises(ValueError) as context:
                 scrape_player("https://tv.akwam.tv/watch/episode-1")
         self.assertIn("رابط فيديو مباشر", str(context.exception))
+
+    def test_scrape_player_accepts_direct_video_url_without_page_fetch(self):
+        with patch("arabcity_scraper.fetch_html") as mocked_fetch_html:
+            result = scrape_player("https://cdn.example.test/media/episode-1.mp4")
+        mocked_fetch_html.assert_not_called()
+        self.assertEqual(result["selected"]["kind"], "video")
+        self.assertEqual(result["selected"]["url"], "https://cdn.example.test/media/episode-1.mp4")
 
     def test_filter_playable_items_keeps_verified_direct_streams(self):
         items = [
@@ -233,6 +262,10 @@ class ArabCityScraperTests(unittest.TestCase):
         self.assertIn('items.filter(item => item.kind === "series").slice(0, 10)', INDEX_HTML)
         self.assertIn('button.dataset.autoloaded = "1"', INDEX_HTML)
         self.assertIn("episodeMetaRequests", INDEX_HTML)
+
+    def test_index_blocks_unverified_episode_watch_buttons(self):
+        self.assertIn("isDirectVideoUrl", INDEX_HTML)
+        self.assertIn("لا توجد روابط مشاهدة مباشرة مؤكدة", INDEX_HTML)
 
     def test_complete_library_group_uses_supported_manifest_catalogs(self):
         expected = tuple(str(catalog["id"]) for catalog in MANIFEST["catalogs"] if str(catalog["id"]) in CATALOG_ROUTES)

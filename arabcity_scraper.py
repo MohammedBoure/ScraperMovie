@@ -202,6 +202,7 @@ class EpisodeLink:
             "number": self.number,
             "image": self.image,
             "stream_id": self.stream_id,
+            "playable_reference": has_episode_playable_reference(self),
         }
 
 
@@ -671,6 +672,14 @@ def looks_like_episode_link(title: str, url: str) -> bool:
     return bool(re.search(r"/(?:episode|episodes|watch|video|videos)(?:/|$)", path))
 
 
+def is_video_url(url: str) -> bool:
+    return bool(re.search(r"\.(?:mp4|m3u8|mpd|webm|ogg|mov)(?:$|[?#])", urlparse(url).path.casefold()))
+
+
+def has_episode_playable_reference(episode: EpisodeLink) -> bool:
+    return bool(episode.stream_id) or (bool(episode.url) and is_video_url(episode.url) and is_allowed_source_url(episode.url))
+
+
 def extract_episode_links(document: str, page_source_url: str) -> list[EpisodeLink]:
     episodes: dict[str, EpisodeLink] = {}
     for token in extract_tokens(document, page_source_url):
@@ -685,7 +694,10 @@ def extract_episode_links(document: str, page_source_url: str) -> list[EpisodeLi
         number = detect_episode_number(title)
         if not title:
             title = f"Episode {number}" if number else "Watch"
-        episodes[key] = EpisodeLink(title=title, url=token.href, number=number, image=token.image)
+        episode = EpisodeLink(title=title, url=token.href, number=number, image=token.image)
+        if not has_episode_playable_reference(episode):
+            continue
+        episodes[key] = episode
     return sorted(
         episodes.values(),
         key=lambda episode: (
@@ -705,10 +717,6 @@ BLOCKED_PLAYER_HOST_TERMS = (
     "adservice",
     "taboola",
 )
-
-
-def is_video_url(url: str) -> bool:
-    return bool(re.search(r"\.(?:mp4|m3u8|mpd|webm|ogg|mov)(?:$|[?#])", urlparse(url).path.casefold()))
 
 
 def player_score(player: PlayerLink, page_url: str) -> tuple[int, str]:
@@ -1005,6 +1013,8 @@ def scrape_player(media_url: str, stream_id: str = "") -> dict[str, object]:
         media_url = players[0].url if players else ""
     if media_url and not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
+    if not players and media_url and is_video_url(media_url):
+        players = [PlayerLink(url=media_url, kind="video", title="Direct video")]
     if not players:
         document = fetch_html(media_url)
         players = direct_video_players(extract_player_links(document, media_url))
@@ -1025,6 +1035,7 @@ def scrape_episode_meta(media_url: str, source: str = "akwam", name: str = "") -
     if not is_allowed_source_url(media_url):
         raise ValueError("Unsupported media URL")
     episodes, errors = cached_addon_episode_links(media_url, source=source, name=name)
+    episodes = [episode for episode in episodes if has_episode_playable_reference(episode)]
     return {
         "url": media_url,
         "source": source,
@@ -1047,6 +1058,7 @@ def scrape_episodes(media_url: str, source: str = "akwam", name: str = "") -> di
     if not episodes:
         document = fetch_html(media_url)
         episodes = extract_episode_links(document, media_url)
+    episodes = [episode for episode in episodes if has_episode_playable_reference(episode)]
     return {
         "url": media_url,
         "count": len(episodes),
@@ -1960,14 +1972,23 @@ INDEX_HTML = """<!doctype html>
       );
     }
 
-    function episodeLinksMarkup(episodes) {
-      if (!episodes || !episodes.length) {
-        return `<span class="inline-error">لا توجد حلقات مؤكدة من ArabCity meta لهذا العمل.</span>`;
+    function isDirectVideoUrl(url) {
+      try {
+        return /\\.(mp4|m3u8|mpd|webm|ogg|mov)(?:$|[?#])/.test(new URL(url, window.location.href).pathname.toLowerCase());
+      } catch (_error) {
+        return false;
       }
-      return episodes.map(episode => {
+    }
+
+    function episodeLinksMarkup(episodes) {
+      const playableEpisodes = (episodes || []).filter(episode => episode.stream_id || isDirectVideoUrl(episode.url));
+      if (!playableEpisodes.length) {
+        return `<span class="inline-error">لا توجد روابط مشاهدة مباشرة مؤكدة لهذه الحلقات.</span>`;
+      }
+      return playableEpisodes.map(episode => {
         const label = episode.title || (episode.number ? `Episode ${episode.number}` : "Watch");
-        const directClass = episode.stream_id ? " is-direct" : "";
-        const directLabel = episode.stream_id ? "مباشر" : "تحقق";
+        const directClass = episode.stream_id || isDirectVideoUrl(episode.url) ? " is-direct" : "";
+        const directLabel = episode.stream_id ? "مباشر" : "فيديو مباشر";
         return `<a class="episode-link episode-play${directClass}" href="${escapeHtml(episode.url)}" data-title="${escapeHtml(label)}" data-stream-id="${escapeHtml(episode.stream_id || "")}"><span>${escapeHtml(label)}</span><small>${directLabel}</small><i data-lucide="play"></i></a>`;
       }).join("");
     }
